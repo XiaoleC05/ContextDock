@@ -106,6 +106,42 @@ MUTATIONS = [
      "internal/chunk/chunker.go",
      "} else if brk := lastSentenceBreak(runes, pos, end); brk > pos {\n\t\t\tend = brk\n\t\t}",
      "}"),
+
+    # ---- embed ----
+    ("embed: 请求体里加了 dimensions 字段（DESIGN §2 红线）",
+     "internal/embed/siliconflow.go",
+     "\tEncodingFormat string   `json:\"encoding_format\"`\n}",
+     "\tEncodingFormat string   `json:\"encoding_format\"`\n\tDimensions     int      `json:\"dimensions\"`\n}"),
+
+    ("embed: 不按 32 条分批",
+     "internal/embed/siliconflow.go",
+     "for start := 0; start < len(texts); start += MaxBatchSize {",
+     "for start := 0; start < len(texts); start += len(texts) {"),
+
+    ("embed: 对 400 也重试",
+     "internal/embed/siliconflow.go",
+     "if json.Unmarshal(raw, &se) == nil && se.Message != \"\" {\n\t\t\treturn nil, false, &se\n\t\t}",
+     "if json.Unmarshal(raw, &se) == nil && se.Message != \"\" {\n\t\t\treturn nil, true, &se\n\t\t}"),
+
+    ("embed: 不校验返回维度",
+     "internal/embed/siliconflow.go",
+     "if len(d.Embedding) != types.EmbeddingDim {",
+     "if false {"),
+
+    ("embed: 不按 index 排序响应",
+     "internal/embed/siliconflow.go",
+     "sort.Slice(out.Data, func(i, j int) bool { return out.Data[i].Index < out.Data[j].Index })",
+     "_ = sort.Slice"),
+
+    ("embed: 假嵌入不做归一化",
+     "internal/embed/fake.go",
+     "norm := float32(math.Sqrt(sum))",
+     "norm := float32(math.Sqrt(sum)*0 + 1)"),
+
+    ("embed: 不校验空文本",
+     "internal/embed/fake.go",
+     "if strings.TrimSpace(t) == \"\" {",
+     "if strings.HasPrefix(t, \"\\x00\") {"),
 ]
 
 
