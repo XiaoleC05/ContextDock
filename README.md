@@ -3,14 +3,15 @@
 > 基于 Go 的混合检索 MCP 服务，为本地 Agent 提供向量 + BM25 混合召回
 
 [![CI](https://github.com/XiaoleC05/ContextDock/actions/workflows/ci.yml/badge.svg)](https://github.com/XiaoleC05/ContextDock/actions/workflows/ci.yml)
+[![v1.0.0](https://img.shields.io/github/milestones/progress/XiaoleC05/ContextDock/9?label=v1.0.0)](https://github.com/XiaoleC05/ContextDock/milestone/9)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![MCP](https://img.shields.io/badge/MCP-stdio-blueviolet)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ContextDock 是一个**本机运行**的 MCP Server。它把文档切分成片段、生成向量、存入 PostgreSQL，
 并在 Agent 提问时用「关键词检索 + 向量检索 + RRF 融合」找出最相关的片段返回。
 
-> 🚧 **开发中** · `v1.0.0` 进度 3/25 —— 见 [里程碑](https://github.com/XiaoleC05/ContextDock/milestone/9)
+> 🚧 **开发中** · 目标版本 [`v1.0.0`](https://github.com/XiaoleC05/ContextDock/milestone/9)，
+> 进度见上方徽章（实时读取，不需要手动维护）
 
 ---
 
