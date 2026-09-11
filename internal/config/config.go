@@ -1,0 +1,300 @@
+// Package config 把散落的环境变量收口到一处，并在启动时校验。
+//
+// 为什么必须收口：如果 SiliconFlowEmbedder 和 postgres Store 各自写
+// os.Getenv，就会出现"某个变量缺了但没人发现"的情况——而且症状是
+// 第一次检索才 401/403，排查时先怀疑的是网络和鉴权，不是配置。
+package config
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/XiaoleC05/ContextDock/internal/types"
+)
+
+// 环境变量名。集中在这里，避免各处写字符串字面量写错。
+const (
+	EnvSiliconFlowAPIKey = "SILICONFLOW_API_KEY"
+	EnvSiliconFlowBase   = "SILICONFLOW_BASE_URL"
+	EnvEmbeddingModel    = "CONTEXTDOCK_EMBEDDING_MODEL"
+	EnvDatabaseURL       = "CONTEXTDOCK_DATABASE_URL"
+	EnvUseMemoryStore    = "CONTEXTDOCK_USE_MEMORY_STORE"
+	EnvTopK              = "CONTEXTDOCK_TOP_K"
+	EnvSearchTimeout     = "CONTEXTDOCK_SEARCH_TIMEOUT"
+	EnvChunkMaxRunes     = "CONTEXTDOCK_CHUNK_MAX_RUNES"
+	EnvChunkOverlap      = "CONTEXTDOCK_CHUNK_OVERLAP"
+	EnvPoolMaxConns      = "CONTEXTDOCK_POOL_MAX_CONNS"
+)
+
+// 默认值。
+const (
+	DefaultTopK          = 10
+	DefaultSearchTimeout = 5 * time.Second
+	DefaultChunkMaxRunes = 400
+	DefaultChunkOverlap  = 60
+
+	// 默认连接池上限。
+	//
+	// ⚠️ pgx 的默认值是 max(4, runtime.NumCPU())，在 28 线程的机器上会开到
+	// 28 条连接。单机 MCP server 根本用不到那么多，还会和容器里的
+	// max_connections 叠加。这里显式收窄。
+	DefaultPoolMaxConns = 8
+)
+
+var (
+	// ErrMissingAPIKey 表示没配置 API Key。
+	ErrMissingAPIKey = errors.New("config: 缺少 " + EnvSiliconFlowAPIKey)
+
+	// ErrMissingDatabaseURL 表示选了 postgres 存储但没配连接串。
+	ErrMissingDatabaseURL = errors.New("config: 缺少 " + EnvDatabaseURL)
+
+	// ErrBadValue 表示某个变量的值不合法。
+	ErrBadValue = errors.New("config: 环境变量的值不合法")
+)
+
+// Config 是全部运行时配置。
+type Config struct {
+	// Embedding
+	SiliconFlowAPIKey string
+	SiliconFlowBaseURL string
+	EmbeddingModel    string
+
+	// 存储
+	UseMemoryStore bool
+	DatabaseURL    string
+	PoolMaxConns   int32
+
+	// 检索
+	TopK          int
+	SearchTimeout time.Duration
+
+	// 切分
+	ChunkMaxRunes int
+	ChunkOverlap  int
+
+	// EmbeddingDim 是向量维度，从 types 带入，方便统一引用。
+	EmbeddingDim int
+}
+
+// Getenv 是读取环境变量的函数签名。
+//
+// 第二个返回值表示"这个变量是否存在"，用于区分**未设置**和**设为空字符串**：
+// 前者应该报错，后者应该报另一种错（配置写错了）。
+type Getenv func(key string) (string, bool)
+
+// Load 从 .env 文件 + 进程环境变量读取配置。
+//
+// 优先级：**进程环境变量 > .env 文件**。
+// 这样 Agent 的配置文件里写的 env 块能覆盖开发时的 .env。
+//
+// .env 文件不存在不算错误——生产环境通常直接用进程环境变量注入。
+func Load() (*Config, error) {
+	dotenv, err := ReadDotEnv(".env")
+	if err != nil {
+		return nil, err
+	}
+	return LoadWith(func(key string) (string, bool) {
+		if v, ok := os.LookupEnv(key); ok {
+			return v, true
+		}
+		v, ok := dotenv[key]
+		return v, ok
+	})
+}
+
+// LoadWith 用给定的取值函数加载配置，便于测试。
+func LoadWith(getenv Getenv) (*Config, error) {
+	cfg := &Config{
+		SiliconFlowBaseURL: "https://api.siliconflow.cn/v1",
+		EmbeddingModel:     "Pro/BAAI/bge-m3",
+		UseMemoryStore:     false,
+		TopK:               DefaultTopK,
+		SearchTimeout:      DefaultSearchTimeout,
+		ChunkMaxRunes:      DefaultChunkMaxRunes,
+		ChunkOverlap:       DefaultChunkOverlap,
+		PoolMaxConns:       DefaultPoolMaxConns,
+		EmbeddingDim:       types.EmbeddingDim,
+	}
+
+	// ---- 必填 ----
+	key, ok := getenv(EnvSiliconFlowAPIKey)
+	if !ok {
+		return nil, ErrMissingAPIKey
+	}
+	if strings.TrimSpace(key) == "" {
+		return nil, fmt.Errorf("%w: %s 存在但为空，请填入真实的 API Key",
+			ErrMissingAPIKey, EnvSiliconFlowAPIKey)
+	}
+	cfg.SiliconFlowAPIKey = strings.TrimSpace(key)
+
+	// ---- 可选，带默认值 ----
+	if v, ok := getenv(EnvSiliconFlowBase); ok {
+		cfg.SiliconFlowBaseURL = v
+	}
+	if v, ok := getenv(EnvEmbeddingModel); ok {
+		cfg.EmbeddingModel = v
+	}
+	if v, ok := getenv(EnvDatabaseURL); ok {
+		cfg.DatabaseURL = v
+	}
+
+	if v, ok := getenv(EnvUseMemoryStore); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s=%q 不是合法的布尔值",
+				ErrBadValue, EnvUseMemoryStore, v)
+		}
+		cfg.UseMemoryStore = b
+	}
+
+	// 选了 postgres 就必须有连接串——在启动期拦住，
+	// 而不是等第一次查询时连接失败。
+	if !cfg.UseMemoryStore && cfg.DatabaseURL == "" {
+		return nil, fmt.Errorf("%w（或设置 %s=true 使用内存存储）",
+			ErrMissingDatabaseURL, EnvUseMemoryStore)
+	}
+
+	var err error
+	if cfg.TopK, err = intVar(getenv, EnvTopK, cfg.TopK); err != nil {
+		return nil, err
+	}
+	if cfg.ChunkMaxRunes, err = intVar(getenv, EnvChunkMaxRunes, cfg.ChunkMaxRunes); err != nil {
+		return nil, err
+	}
+	if cfg.ChunkOverlap, err = intVar(getenv, EnvChunkOverlap, cfg.ChunkOverlap); err != nil {
+		return nil, err
+	}
+	if n, err := intVar(getenv, EnvPoolMaxConns, int(cfg.PoolMaxConns)); err != nil {
+		return nil, err
+	} else {
+		cfg.PoolMaxConns = int32(n)
+	}
+	if v, ok := getenv(EnvSearchTimeout); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s=%q 不是合法的时长（如 5s、500ms）",
+				ErrBadValue, EnvSearchTimeout, v)
+		}
+		cfg.SearchTimeout = d
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Validate 做跨字段的一致性校验。
+//
+// 只在 LoadWith 里做单字段校验是不够的——比如 TopK 和 ChunkOverlap
+// 各自都合法，但组合起来可能没意义。
+func (c *Config) Validate() error {
+	if c.TopK <= 0 {
+		return fmt.Errorf("%w: TopK 必须为正数，实际 %d", ErrBadValue, c.TopK)
+	}
+	if c.ChunkMaxRunes <= 0 {
+		return fmt.Errorf("%w: ChunkMaxRunes 必须为正数，实际 %d", ErrBadValue, c.ChunkMaxRunes)
+	}
+	if c.ChunkOverlap < 0 || c.ChunkOverlap >= c.ChunkMaxRunes {
+		return fmt.Errorf("%w: ChunkOverlap(%d) 必须 >=0 且小于 ChunkMaxRunes(%d)",
+			ErrBadValue, c.ChunkOverlap, c.ChunkMaxRunes)
+	}
+	if c.SearchTimeout <= 0 {
+		return fmt.Errorf("%w: SearchTimeout 必须为正数，实际 %v", ErrBadValue, c.SearchTimeout)
+	}
+	if c.PoolMaxConns <= 0 {
+		return fmt.Errorf("%w: PoolMaxConns 必须为正数，实际 %d", ErrBadValue, c.PoolMaxConns)
+	}
+	return nil
+}
+
+// String 实现 fmt.Stringer，**故意隐藏 API Key 与连接串**。
+//
+// 日志里打印配置是很常见的调试手段。如果 String() 原样输出，
+// 一个 log.Printf("%+v", cfg) 就会把密钥写进日志文件。
+func (c Config) String() string {
+	return fmt.Sprintf(
+		"Config{model:%s baseURL:%s apiKey:%s db:%s memoryStore:%v topK:%d timeout:%v "+
+			"chunk:%d/%d poolMaxConns:%d}",
+		c.EmbeddingModel, c.SiliconFlowBaseURL, maskSecret(c.SiliconFlowAPIKey),
+		maskSecret(c.DatabaseURL), c.UseMemoryStore, c.TopK, c.SearchTimeout,
+		c.ChunkMaxRunes, c.ChunkOverlap, c.PoolMaxConns)
+}
+
+// maskSecret 只保留长度信息，不泄露内容。
+func maskSecret(s string) string {
+	if s == "" {
+		return "(未设置)"
+	}
+	return fmt.Sprintf("(已设置，%d 字符)", len(s))
+}
+
+func intVar(getenv Getenv, key string, def int) (int, error) {
+	v, ok := getenv(key)
+	if !ok {
+		return def, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s=%q 不是合法的整数", ErrBadValue, key, v)
+	}
+	return n, nil
+}
+
+// ReadDotEnv 读取 .env 文件，返回键值对。
+//
+// 文件不存在返回空 map 而不是错误——生产环境通常不落 .env 文件。
+//
+// 自己实现解析而不是引 godotenv：格式很简单（KEY=VALUE），
+// 而本项目其他部分刻意保持零依赖。代价是不支持多行值和变量展开，
+// 那对本项目的配置来说用不上。
+func ReadDotEnv(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("config: 读取 %s 失败: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	out := make(map[string]string)
+	sc := bufio.NewScanner(f)
+	lineNo := 0
+	for sc.Scan() {
+		lineNo++
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// 允许 `export KEY=VALUE` 的写法
+		line = strings.TrimPrefix(line, "export ")
+
+		k, v, found := strings.Cut(line, "=")
+		if !found {
+			return nil, fmt.Errorf("config: %s 第 %d 行不是 KEY=VALUE 格式: %q",
+				path, lineNo, line)
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			return nil, fmt.Errorf("config: %s 第 %d 行缺少变量名", path, lineNo)
+		}
+		v = strings.TrimSpace(v)
+		// 去掉成对的引号
+		if len(v) >= 2 {
+			if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+				v = v[1 : len(v)-1]
+			}
+		}
+		out[k] = v
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("config: 读取 %s 失败: %w", path, err)
+	}
+	return out, nil
+}

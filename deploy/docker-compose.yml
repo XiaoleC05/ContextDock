@@ -1,0 +1,60 @@
+# ContextDock 的 PostgreSQL + pgvector 开发环境。
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml down      # 停止，保留数据
+#   docker compose -f deploy/docker-compose.yml down -v   # 停止并删数据卷
+#
+# ⚠️ migrations/ 下的脚本只在**数据卷为空**时执行一次。
+# 改了 SQL 要生效，得先 down -v 把卷删掉重建。
+
+services:
+  postgres:
+    # ⚠️ 版本号写死，不要用 latest。
+    #
+    # 0.8.6 修复了 CVE-2026-3172：并行 HNSW 建索引路径的堆缓冲区溢出，
+    # CVSS 8.1，可读取其他 relation 的内存或打崩实例。
+    # 影响 0.6.0–0.8.1，所以必须 >= 0.8.2，这里取最新的 0.8.6。
+    image: pgvector/pgvector:0.8.6-pg17
+    container_name: contextdock-pg
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: contextdock
+      # 中文排序与全文检索的行为受 locale 影响，显式指定避免不同机器结果不一致。
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+
+    ports:
+      # 只绑定本机：这是个本地开发用的数据库，不应该暴露到局域网。
+      - "127.0.0.1:5432:5432"
+
+    volumes:
+      - contextdock-pgdata:/var/lib/postgresql/data
+      # init 脚本目录。容器**首次**启动且数据目录为空时按文件名顺序执行。
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      # 让依赖它的东西（CI、脚本）能等到数据库真正可用，
+      # 而不是"容器起来了但还没接受连接"。
+      test: ["CMD-SHELL", "pg_isready -U postgres -d contextdock"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    command:
+      - postgres
+      # 单机 MCP server 用不到太多连接。pgx 那边也会显式收窄到 8。
+      - -c
+      - max_connections=50
+      # 建向量索引时用得上，太小会退化成磁盘构建。
+      - -c
+      - maintenance_work_mem=512MB
+      # 记录慢查询，方便排查。
+      - -c
+      - log_min_duration_statement=500
+
+volumes:
+  contextdock-pgdata:
+    name: contextdock-pgdata
