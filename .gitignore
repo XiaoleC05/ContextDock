@@ -1,13 +1,20 @@
 # ---- 二进制与构建产物 ----
 /bin/
 /dist/
+# ⚠️ 必须锚定到仓库根（开头的 /）。
+#
+# 曾经这里写的是裸的 `contextdock`，本意是忽略编译产物，
+# 但裸模式会匹配**任意层级**下同名文件或目录——包括 cmd/contextdock/。
+# 结果整个程序入口从没被提交，而本地因为文件就在磁盘上一切正常，
+# 直到 CI 报 "directory not found" 才发现。
+#
+# 教训：.gitignore 里忽略具体名字时，尽量写锚定路径。
+/contextdock
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-contextdock
-contextdock.exe
 
 # ---- Go 测试与性能分析产物 ----
 *.test

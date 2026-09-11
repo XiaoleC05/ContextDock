@@ -146,21 +146,25 @@ func (s *Service) Search(ctx context.Context, query string, topK int) (*SearchOu
 		topK = s.cfg.TopK
 	}
 
+	// ---- 读一次索引规模 ----
 	s.idxMu.RLock()
-	bm25 := s.bm25
-	vecIdx := s.vecIdx
-	vecEmpty := vecIdx.Len() == 0
+	bm25Empty := s.bm25.Len() == 0
+	vecEmpty := s.vecIdx.Len() == 0
 	s.idxMu.RUnlock()
 
 	out := &SearchOutput{Query: query, TopK: topK}
 
 	// 两路都不可用时没有降级空间，直接返回空。
-	if bm25.Len() == 0 && vecEmpty {
+	if bm25Empty && vecEmpty {
 		out.Degraded = "索引为空"
 		return out, nil
 	}
 
-	// ---- 尝试生成查询向量 ----
+	// ---- 生成查询向量：**刻意不持锁** ----
+	//
+	// 这是网络调用，可能耗时几百毫秒。如果在这里持读锁，
+	// 并发的 Rebuild（要拿写锁）就得等这么久，而 Rebuild 期间
+	// 所有检索都会被卡住。
 	var queryVec []float32
 	if !vecEmpty {
 		vecs, err := s.embedder.Embed(ctx, []string{query})
@@ -176,17 +180,28 @@ func (s *Service) Search(ctx context.Context, query string, topK int) (*SearchOu
 		out.Degraded = "没有可用的向量索引，已降级为关键词检索"
 	}
 
-	// ---- 检索 ----
+	// ---- 检索：全程持读锁 ----
+	//
+	// ⚠️ 锁必须一直覆盖到 Search 返回。
+	//
+	// 这里曾经提前 RUnlock 了，导致并发的 Rebuild（持写锁）可以在
+	// Search 读索引的过程中重建索引——**真的数据竞争**。
+	// 本机跑不了 -race 所以一直没暴露，直到 CI 上才报出来。
+	//
+	// 教训：注释里写「用 RWMutex 隔开」不等于代码真的隔开了。
+	// 锁的作用域要盯到实际访问共享数据的那几行为止。
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+
 	if queryVec == nil {
 		// 纯关键词路径
-		results := bm25.Search(query, topK)
-		out.Results = results
+		out.Results = s.bm25.Search(query, topK)
 		return out, nil
 	}
 
 	hybrid := retrieve.NewHybrid(
-		retrieve.BM25Searcher{BM25: bm25},
-		vecIdx,
+		retrieve.BM25Searcher{BM25: s.bm25},
+		s.vecIdx,
 	).WithTimeout(s.cfg.SearchTimeout).
 		WithErrorHandler(func(r types.Retriever, err error) {
 			log.Printf("%s 检索失败，已降级: %v", r, err)
