@@ -1,0 +1,46 @@
+# ---- 二进制与构建产物 ----
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+contextdock
+contextdock.exe
+
+# ---- Go 测试与性能分析产物 ----
+*.test
+*.out
+coverage.out
+coverage.html
+cpu.prof
+mem.prof
+*.pprof
+
+# ---- 依赖目录 ----
+# 应用类项目通常提交 vendor/，如需离线构建再取消注释
+# /vendor/
+
+# ---- 密钥与环境变量（重要：硅基流动 API Key 绝不能提交）----
+.env
+.env.*
+!.env.example
+
+# ---- 本地数据与临时目录 ----
+/data/
+/tmp/
+*.log
+
+# ---- IDE ----
+.idea/
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+*.swp
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+Desktop.ini
