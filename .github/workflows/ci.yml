@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build / Vet / Format / Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 从 go.mod 读取版本，避免两处维护
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # gofmt -l 会列出格式不规范的文件；有输出就说明没格式化，直接失败
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # GitHub 的 Ubuntu runner 自带 gcc，所以 -race 可用
+      - name: Test (race detector + coverage)
+        run: go test -race -cover -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      # 检查有没有把密钥误提交进来
+      - name: Check for leaked secrets
+        run: |
+          if git ls-files | grep -qE '(^|/)\.env$'; then
+            echo "错误：.env 被提交进了仓库"
+            exit 1
+          fi
+          echo "未发现 .env 泄漏"

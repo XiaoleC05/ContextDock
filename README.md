@@ -2,36 +2,28 @@
 
 > 基于 Go 的混合检索 MCP 服务，为本地 Agent 提供向量 + BM25 混合召回
 
+[![CI](https://github.com/XiaoleC05/ContextDock/actions/workflows/ci.yml/badge.svg)](https://github.com/XiaoleC05/ContextDock/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![MCP](https://img.shields.io/badge/MCP-stdio-blueviolet)](https://modelcontextprotocol.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ContextDock 是一个**本机运行**的 MCP Server。它把文档切分成片段、生成向量、存入 PostgreSQL，
 并在 Agent 提问时用「关键词检索 + 向量检索 + RRF 融合」找出最相关的片段返回。
 
-**核心职责：为 Agent 提供准确、快速、可靠的文档检索结果。**
-
----
-
-## 目录
-
-- [这是什么](#这是什么)
-- [快速开始](#快速开始)
-- [架构](#架构)
-- [技术选型](#技术选型)
-- [目录结构](#目录结构)
-- [开发流程](#开发流程)
-- [开发阶段](#开发阶段)
-- [关键设计决策](#关键设计决策)
-- [开发避坑清单](#开发避坑清单)
+> 🚧 **开发中** · `v1.0.0` 进度 3/25 —— 见 [里程碑](https://github.com/XiaoleC05/ContextDock/milestone/9)
 
 ---
 
 ## 这是什么
 
-想象你有一本很厚的资料册，和一个记性很好但**没读过这本册子**的助手。
-你问它问题，它只能瞎编——因为册子不在它脑子里。
+### 解决什么问题
 
-ContextDock 就是一个中间人，站在助手和资料册之间，干两件事：
+Agent 很聪明，但它**没读过你的文档**。你问它问题，它只能瞎编——因为资料不在它脑子里。
 
-- **存**：你把资料给它，它把资料剪成小纸条（**切分**），给每张纸条拍一张「语义指纹」（**向量**），存进仓库。
-- **取**：你提问时，它同时用两种方式找纸条，然后把两边的结果合并排序，挑最相关的几张递给你。
+ContextDock 站在 Agent 和你的文档之间，干两件事：
+
+- **存**：把文档剪成小纸条（切分），给每张纸条拍一张「语义指纹」（向量），存进仓库
+- **取**：你提问时，同时用两种方式找纸条，合并排序后挑最相关的递回去
 
 ### 为什么要两种检索方式
 
@@ -39,39 +31,30 @@ ContextDock 就是一个中间人，站在助手和资料册之间，干两件�
 
 | 只用一种 | 会出的问题 |
 | --- | --- |
-| 只用关键词 | 你问「怎么让程序跑得快」，资料里写的是「性能优化」——一个字没对上，找不到 |
+| 只用关键词 | 你问「怎么让程序跑得快」，文档里写的是「性能优化」——一个字没对上，找不到 |
 | 只用语义 | 你问「Error 5001 怎么解决」，语义检索觉得「Error 5002」也很像，把错的递给你 |
 
 把两边结果**按名次**合并（而不是按分数加权），这一招叫 **RRF**，是 ContextDock 的核心。
+为什么按名次而不是分数，见 [设计决策 #6](docs/DESIGN.md)。
 
-### 两条数据流
+### 不适合什么
 
-导入：
-
-```text
-用户提供文档 → Agent 调用 import_document → 读取文档
-    → 切分成多个片段 → 调用 Embedding API 生成向量
-    → 存入 PostgreSQL（片段 + 向量 + 元数据）
-```
-
-检索：
-
-```text
-用户提问 → Agent 调用 search_knowledge_base
-    → 关键词检索（BM25） ┐
-    → 向量检索（余弦）   ┴→ RRF 融合 → 返回最相关的片段
-```
-
-### 第一版的范围边界
-
-**做**：直接传入的文本、`.txt`、`.md`、基础元数据、中英混合文档。
-
-**不做**（刻意留白，避免范围失控）：
+第一版**刻意不做**这些，避免范围失控：
 
 - LLM 对话生成、Agent 编排
 - PDF / Word 解析、图片或图文混合内容
-- 前端页面、复杂权限系统
-- Elasticsearch、分布式任务队列、多节点集群
+- 中文以外的语种（只处理中英混合）
+- 前端页面、权限系统、多节点集群
+
+---
+
+## 关键特性
+
+- **混合检索**：BM25 关键词 + 向量语义，RRF 融合（k=60）
+- **中英混合分词**：按书写系统分流——CJK 走字符 bigram，拉丁字母按词切，零外部依赖
+- **两套存储实现**：内存版用于测试和 benchmark，pgvector 版用于持久化——检索核心不依赖数据库
+- **可测的检索核心**：`FakeEmbedder` 不访问网络，BM25 与向量检索都能在纯内存里跑测试
+- **MCP stdio 接入**：两个工具 `import_document` / `search_knowledge_base`
 
 ---
 
@@ -82,28 +65,66 @@ ContextDock 就是一个中间人，站在助手和资料册之间，干两件�
 | 组件 | 版本 | 说明 |
 | --- | --- | --- |
 | Go | ≥ 1.25 | 官方 MCP SDK 要求；本项目开发用 1.26.4 |
-| Docker Desktop | 任意 | 需启用 Linux 容器模式 |
-| Docker Compose | v2+ | 本项目开发用 v5.4.0 |
-| C 编译器 | MinGW-w64 | **仅跑 `-race` 时需要**，见[开发避坑清单](#开发避坑清单) |
+| Docker Desktop | 任意 | 需启用 Linux 容器模式，M5 之后才用得到 |
+| C 编译器 | MinGW-w64 | 仅跑 `-race` 时需要，CI 上自带 |
 
-### 编译与测试
+### 构建与测试
 
 ```bash
+git clone https://github.com/XiaoleC05/ContextDock.git
+cd ContextDock
+
 go build ./...
 go vet ./...
-gofmt -l .            # 无输出 = 格式规范
-go test ./...         # 跑全部测试
-go test -v ./...      # 带用例名输出
-go test -cover ./...  # 看覆盖率
+go test ./...
 ```
 
-### 启动数据库
+**当前可运行的部分**：核心类型（`internal/types`），25 个测试用例，覆盖率 96.2%。
 
-> 第五天之前不需要，现在跑了也没有代码连它。
+### 配置 API Key
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+cp .env.example .env      # 然后把你的 key 填进去
 ```
+
+```ini
+SILICONFLOW_API_KEY=sk-xxxxxxxx
+```
+
+> `.env` 已在 `.gitignore` 中。**不要在代码里硬编码 key。**
+
+---
+
+## 用法
+
+> ⏳ M6 完成后可用。以下为目标形态。
+
+### MCP 工具
+
+| 工具 | 输入 | 输出 |
+| --- | --- | --- |
+| `import_document` | 文本内容 或 `.txt` / `.md` 文件路径、标题、元数据 | 导入的片段数、文档 ID |
+| `search_knowledge_base` | 查询字符串、`top_k` | 最相关的文档片段（**不含向量**） |
+
+### 在 Agent 中配置
+
+Claude Desktop（Windows），编辑 `%APPDATA%\Claude\claude_desktop_config.json`：
+
+```json
+{
+  "mcpServers": {
+    "contextdock": {
+      "command": "d:/05_Code/ContextDock/bin/contextdock.exe",
+      "env": { "SILICONFLOW_API_KEY": "sk-xxx" }
+    }
+  }
+}
+```
+
+改完**必须从系统托盘完全退出 Agent 再重启**——热重载无效。
+
+> **Windows 注意**：`command` 直接指向编译好的 `.exe` 时**不需要** `cmd /c` 包装。
+> 只有 `npx` / `uvx` 这类脚本才需要。
 
 ---
 
@@ -143,728 +164,99 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 **读图要点**：左边是唯一的外部依赖（Embedding API），右边是自己的仓库。
-中间那三条横线（检索层）是这个项目真正要写的东西。
+中间三条横线（检索层）是这个项目真正要写的东西。
+
+### 目录结构
+
+```text
+ContextDock/
+├── cmd/contextdock/       # 程序入口，组装依赖
+├── internal/
+│   ├── types/             # ✅ 核心数据结构
+│   ├── chunk/             # 文档切分
+│   ├── tokenize/          # 中英分流分词器
+│   ├── embed/             # Embedder 接口 + Fake + SiliconFlow
+│   ├── retrieve/          # bm25 / vector / rrf
+│   ├── store/             # 存储接口 + memory + postgres
+│   └── mcp/               # MCP 工具注册
+├── docs/                  # 设计与避坑文档
+├── migrations/            # 建表 SQL
+└── deploy/                # docker-compose
+```
 
 ---
 
 ## 技术选型
 
-| 层 | 选型 | 版本/规格 |
+| 层 | 选型 | 规格 |
 | --- | --- | --- |
-| 语言 | Go | 1.26.4 |
+| 语言 | Go | 1.26 |
 | 通信 | MCP stdio | 官方 `modelcontextprotocol/go-sdk` |
 | 存储 | PostgreSQL + pgvector | pgvector **≥ 0.8.6** |
-| 数据库驱动 | pgx | v5 + `pgvector-go` |
+| 驱动 | pgx v5 + pgvector-go | |
 | Embedding | 硅基流动 `Pro/BAAI/bge-m3` | **1024 维**，8K 上下文 |
 | 关键词检索 | 自研内存版 BM25 | k1=1.2, b=0.75 |
-| 分词 | 字符级 bigram（中文）+ 词级（英文） | 按书写系统分流 |
+| 分词 | 字符 bigram（CJK）+ 词级（拉丁） | 零依赖 |
 | 混合排序 | RRF | k=60 |
 
+### 几个关键取舍
+
+| 选择 | 放弃了什么 | 为什么 |
+| --- | --- | --- |
+| **1024 维** | Qwen3 的更高 MTEB 分数 | pgvector 的 HNSW 索引对 `vector` 上限 **2000 维**，4096 维**连 halfvec 都建不了索引** |
+| **bigram 分词** | 词级分词的语义精度 | `gojieba` 依赖 cgo 毁掉交叉编译，`sego` 五年无维护。bigram 零依赖且未登录词免疫 |
+| **RRF 融合** | 加权求和的分数信息 | BM25 分与余弦相似度不在同一量级，加权求和需先归一化，而归一化没有标准答案 |
+| **内存 + pgvector 双实现** | 一点抽象成本 | 否则写 BM25 和 benchmark 时被迫先启动数据库 |
+
+完整的决策记录（含被否决的方案）见 **[docs/DESIGN.md](docs/DESIGN.md)**。
+
 ---
 
-## 目录结构
+## 测试
 
-```text
-ContextDock/
-├── cmd/
-│   └── contextdock/
-│       └── main.go            # 程序入口，组装依赖，启动 MCP server
-├── internal/
-│   ├── types/                 # ✅ 核心数据结构（已完成）
-│   ├── chunk/                 # 文档切分
-│   ├── tokenize/              # 中文 bigram + 英文词级分词器
-│   ├── embed/                 # Embedder 接口 + FakeEmbedder + SiliconFlowEmbedder
-│   ├── retrieve/              # bm25 / vector / rrf
-│   ├── store/                 # 存储接口 + memory 实现 + postgres 实现
-│   ├── mcp/                   # MCP 工具注册
-│   └── config/                # 配置读取
-├── migrations/                # 建表 SQL
-├── deploy/
-│   └── docker-compose.yml     # PostgreSQL + pgvector
-├── go.mod
-└── README.md
+```bash
+go test ./...                              # 全部测试
+go test -v ./...                           # 带用例名
+go test -cover ./...                       # 覆盖率
+CGO_ENABLED=1 go test -race ./...          # 竞态检测（需要 C 编译器）
+go test -bench . -benchmem ./...           # 性能基准
 ```
 
-**为什么用 `internal/`**：Go 的约定，这个目录下的包外部**无法 import**。
-单二进制项目用它是对的，能防止以后别人误引用内部实现。
+**测试有效性用变异测试验证**——覆盖率高不代表测试有效。
+本项目通过故意植入 bug 来确认测试会失败（7/7 被捕获）：
 
-**为什么没有 `pkg/`**：那是给「要被别人 import 的库」用的，本项目是应用，不是库。
-
-**为什么 `store/` 有两套实现**：`memory` 和 `postgres` 并存是刻意的。
-第三天写 BM25 和 benchmark 时，不该被迫先启动数据库。
-
----
-
-## 开发流程
-
-**里程碑 = 一次发布的交付范围。** 本项目当前只有一个里程碑：
-
-> **`v1.0.0`** —— 首个可用版本
-
-所有任务都以 GitHub Issue 的形式跟踪，全部挂在 `v1.0.0` 下。
-**所有 issue 关闭 = 里程碑完成 = 发布 v1.0.0。**
-
-不额外使用阶段标签——issue 列表本身就是进度视图，标签是冗余的。
-
-| 位置 | 内容 |
-| --- | --- |
-| **Issues** | 25 个任务，一个 issue 对应一个可交付物 |
-| **Milestone** | `v1.0.0`，显示总体完成百分比 |
-| **Commits** | `feat(scope): 描述`，正文里写 `closes #N` 自动关闭 issue |
-
-每个 issue 的正文都包含：**目标 / 交付物 / 验收标准 / 注意事项 / 参考**，
-可以直接照着做，不需要回来翻文档。
-
----
-
-## 开发阶段
-
-下面七个**阶段**描述开发顺序，每个阶段对应 `v1.0.0` 下的一组 issue。
-它不是发布单位，只是排期参考——**验收不通过不进入下一个阶段**。
-
-### M0 · 仓库初始化 ✅ 已完成
-
-#### 目标
-
-把空目录变成可以安全接收代码的仓库。
-
-#### 任务清单
-
-- [x] `git init` + 关联远程仓库
-- [x] `.gitignore`（重点：`.env` 必须在第一个 commit 之前就位）
-- [x] `.gitattributes`（统一换行符为 LF）
-- [x] `README.md` 骨架
-
-#### 验收标准
-
-`git status` 干净，`git ls-files` 只有仓库级文件。
-
----
-
-### M1 · 核心类型 ✅ 已完成
-
-#### 目标
-
-把架构决策变成**编译期约束**。这一阶段刻意不写任何业务逻辑。
-
-#### 任务清单
-
-- [x] `go mod init github.com/XiaoleC05/ContextDock`
-- [x] `internal/types/document.go` —— `Document`
-- [x] `internal/types/chunk.go` —— `Chunk`
-- [x] `internal/types/search.go` —— `Retriever` / `SearchResult`
-- [x] `internal/types/types_test.go` —— 25 个用例，覆盖率 96.2%
-- [x] 通过**变异测试**验证测试有效性（7/7 变异被抓到，见下）
-
-#### 验收结果
-
-| 检查 | 结果 |
-| --- | --- |
-| `go build ./...` | ✅ |
-| `go vet ./...` | ✅ |
-| `gofmt -l .` | ✅ |
-| `go test ./...` | ✅ 25 passed，覆盖率 96.2% |
-| `go test -race ./...` | ⏸ 延后到 M4 前（需先装 C 编译器） |
-
-#### 测试有效性用变异测试验证
-
-覆盖率高不代表测试有效。本阶段的测试用**变异测试**验证过：故意在源码里植入
-bug，确认测试会失败。7 个变异全部被抓到：
-
-| 变异 | 抓住它的测试 |
+| 植入的 bug | 抓住它的测试 |
 | --- | --- |
 | 删掉 `Embedding` 的 `json:"-"` | `TestChunkJSONKeySetIsExact` |
 | 删掉 RRF 的 `rank <= 0` 防护 | `TestRRFScoreIgnoresUnrecalledChannel` |
-| 删掉 `SetMetadata` 的 nil 初始化 | `TestEmptyMetadataOmitted` |
-| `EmbeddingDim` 1024 → 768 | `TestChunkValidate` |
-| `RRFK` 60 → 10 | `TestRRFConstantIsCanonical` |
-| 删掉 `Validate` 的维度检查 | `TestChunkValidate` |
 | `truncateRunes` 改成按字节截断 | `TestTruncateRunesHandlesMultiByte` |
 
-> ⚠️ **踩过的坑**：本文件最初的 `TestChunkEmbeddingIsNotSerialized` 用
-> `strings.Contains(raw, "embedding")`（小写）做断言，而 Go 在没有 json 标签时
-> 序列化出的键是 `"Embedding"`（**大写 E**）。大小写不匹配导致断言**永远不触发**——
-> 删掉 `json:"-"` 它照样绿。已改为**按键集合精确断言**。
-
-#### 核心契约
-
-```go
-const EmbeddingDim = 1024   // 全项目唯一真值来源
-const RRFK = 60             // RRF 平滑常数（SIGIR 2009 论文推荐值）
-
-// 检索的最小单位
-type Chunk struct {
-    ID         int64
-    DocumentID int64   // 零值是非法值
-    Ordinal    int     // 0-based；⚠️ 0 是合法值，不能当哨兵
-    Content    string
-    Embedding  []float32 `json:"-"`  // 关键：永不序列化
-    Metadata   map[string]string     // ⚠️ 裸 map，写入请用 SetMetadata
-}
-
-// Chunk 上必须遵守的方法契约
-func (c *Chunk) SetMetadata(k, v string)  // nil 安全
-func (c Chunk) IndexText() string         // 被索引文本的唯一来源
-func (c Chunk) StableKey() string         // 跨通道融合键，RRF 去重只能用这个
-func (c Chunk) Validate() error           // 收敛校验规则
-func (c Chunk) String() string            // 防止日志打 1024 个浮点数
-
-// 一条检索结果
-type SearchResult struct {
-    Chunk        Chunk
-    Score        float64   // 含义随阶段变化，见"关键设计决策"
-    LexicalScore float64   // 原始分，0 = 该通道未召回
-    VectorScore  float64
-    LexicalRank  int       // 1-based，⚠️ 0 = 未召回，不是第 0 名
-    VectorRank   int
-}
-
-func (r SearchResult) RRFScore(k int) float64  // 内部已处理 0 号哨兵
-```
+> 这条来自一个真实教训：最初的断言用 `strings.Contains(raw, "embedding")`（小写），
+> 而 Go 序列化出的是 `"Embedding"`（**大写 E**）——大小写不匹配导致断言**永不触发**，
+> 删掉 `json:"-"` 测试照样绿。详见 [docs/PITFALLS.md](docs/PITFALLS.md)。
 
 ---
 
-### M2 · 切分与 Embedding
+## 已知限制
 
-#### 目标
-
-文档能进去，向量能出来。这是导入流程的前半段。
-
-**为什么先做切分**：它是纯函数、零依赖、最好写测试，而且**切分质量直接决定检索质量**。
-
-#### 交付物
-
-- [ ] `internal/chunk/chunker.go` —— 切分器
-- [ ] `internal/chunk/chunker_test.go` —— 单测
-- [ ] `internal/tokenize/tokenizer.go` —— 中英分流分词器
-- [ ] `internal/tokenize/tokenizer_test.go` —— 单测
-- [ ] `internal/embed/embedder.go` —— `Embedder` 接口
-- [ ] `internal/embed/fake.go` —— `FakeEmbedder`（不访问网络）
-- [ ] `internal/embed/siliconflow.go` —— `SiliconFlowEmbedder`（真实调用）
-
-#### 接口契约
-
-```go
-type Embedder interface {
-    Embed(ctx context.Context, texts []string) ([][]float32, error)
-}
-```
-
-#### 切分参数
-
-| 参数 | 值 | 理由 |
-| --- | --- | --- |
-| chunk size | **400 字** | 中文 RAG 的经验值区间是 200–500 字 |
-| overlap | **10%–20%**（约 60 字） | 防止答案正好被切断在两个 chunk 的接缝处 |
-| 长度计量 | `utf8.RuneCountInString` | ⚠️ `len()` 是**字节数**，一个汉字占 3 字节 |
-
-#### 分词规则
-
-按书写系统分流，而不是按语言：
-
-```text
-输入:  使用 pgvector 做向量检索
-        └┬─┘ └───┬───┘ └────┬────┘
-      CJK段    ASCII段    CJK段
-输出: [使用]  [pgvector]  [做向, 向量, 量检, 检索]
-```
-
-- Han / 平假名 / 片假名 → 逐字 bigram
-- 拉丁字母 / 数字 → 按空格和标点切词，转小写
-- CJK 段长度为 1 时必须回吐 unigram（否则单字查询永远召回不到）
-
-#### 验收标准
-
-- [ ] `go test ./internal/chunk/ ./internal/tokenize/ ./internal/embed/` 全绿
-- [ ] 切分测试覆盖：中英混合、超长段落、空文档、Markdown 标题
-- [ ] `FakeEmbedder` 对同一输入**永远返回相同向量**（确定性，否则测试无法断言）
-- [ ] `SiliconFlowEmbedder` 有单测（用 `httptest.Server` 造假服务器，不真调 API）
-
-#### 测试方法
-
-```bash
-go test -v ./internal/chunk/
-go test -v ./internal/tokenize/
-go test -v ./internal/embed/
-```
-
-真实 API 连通性验证（需要 API Key，只跑一次）：
-
-```bash
-# 把 key 写进 .env（已在 .gitignore 中）
-curl -X POST https://api.siliconflow.cn/v1/embeddings \
-  -H "Authorization: Bearer $SILICONFLOW_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Pro/BAAI/bge-m3","input":["测试文本"],"encoding_format":"float"}' \
-  | jq '{model, dim: (.data[0].embedding|length)}'
-# 期望 dim: 1024
-```
+- 只处理 **中英混合**的文本；其他语种（泰/老/高棉等无空格语言）需要词典分词，未实现
+- 只支持 `.txt` / `.md` 和直接传入的文本，**不含 PDF / Word 解析**
+- BM25 是**内存索引**，每次启动需从数据库重建，大文档库下启动会变慢
+- 第一版**无并发写入保护**，不适合多进程同时导入
+- 未做多租户隔离，单机单用户场景
 
 ---
 
-### M3 · 内存检索
+## 文档
 
-#### 目标
-
-两路检索都能跑，且**不需要数据库**。
-
-#### 交付物
-
-- [ ] `internal/retrieve/bm25.go` —— 内存版 BM25
-- [ ] `internal/retrieve/vector.go` —— 内存版向量检索 + 余弦相似度
-- [ ] `internal/retrieve/*_test.go` —— 单测
-- [ ] `internal/retrieve/bench_test.go` —— benchmark
-
-#### BM25 公式
-
-必须用 Lucene 变体：
-
-```text
-score(D, Q) = Σ IDF(qᵢ) · f(qᵢ,D)·(k1+1) / (f(qᵢ,D) + k1·(1 - b + b·|D|/avgdl))
-
-IDF(qᵢ) = ln(1 + (N - n + 0.5) / (n + 0.5))
-```
-
-| 符号 | 含义 | 取值 |
-| --- | --- | --- |
-| k1 | 词频饱和系数 | **1.2** |
-| b | 长度归一化强度 | **0.75** |
-| N | 总文档数 | 全局统计量 |
-| n | 含该词的文档数 | 全局统计量 |
-| avgdl | 平均文档长度（**token 数**） | 全局算一次 |
-
-> ⚠️ **IDF 必须用 Lucene 变体**（`ln(1 + ...)`）。
-> Robertson 原始版 `ln((N-n+0.5)/(n+0.5))` 在 `n > N/2` 时会变**负数**，导致排序错乱。
-
-#### 余弦相似度注意事项
-
-- 入库前做 L2 归一化
-- 预先算好每个向量的模长，避免每次查询重复计算
-- 浮点数比较不要用 `==`
-
-#### 验收标准
-
-- [ ] BM25 测试：TF 饱和、IDF 随文档频率下降、长度归一化生效
-- [ ] 余弦相似度测试：正交向量=0、同向=1、反向=-1
-- [ ] 边界：空查询、空文档集、查询词不在任何文档中
-- [ ] `go test -bench . -benchmem ./internal/retrieve/` 有输出
-
-#### 测试方法
-
-```bash
-go test -v ./internal/retrieve/
-go test -bench . -benchmem ./internal/retrieve/
-```
-
----
-
-### M4 · 混合排序与并发
-
-#### 目标
-
-两路结果合并，且并行执行。这是整个项目的技术核心。
-
-#### 前置条件
-
-- [ ] **装好 C 编译器**，`CGO_ENABLED=1 go test -race ./...` 能跑通
-
-#### 交付物
-
-- [ ] `internal/retrieve/rrf.go` —— RRF 融合
-- [ ] `internal/retrieve/hybrid.go` —— 并行执行两路检索
-- [ ] 超时与错误处理
-
-#### RRF 公式
-
-```text
-RRF(d) = Σ 1 / (k + rankᵢ(d))
-
-k = 60（论文推荐值，Elasticsearch 的 rank_constant 默认也是 60）
-```
-
-为什么选 RRF 而不是加权求和：BM25 分和余弦相似度**不在同一个数量级**——
-BM25 可能是 0~20，余弦是 -1~1。加权求和必须先做归一化，而归一化本身
-就是个没有标准答案的问题。RRF **只用名次，不用分数**，天然绕开这件事。
-
-> 参考：RAGFlow 用的是 weighted_sum（默认 `"0.7,0.3"`），因为它需要分数归一化。
-> 两种方案都能用，**能说清取舍**才是重点。
-
-#### 并发要求
-
-- [ ] 两路检索用 `errgroup` 或 `sync.WaitGroup` 并行
-- [ ] 每路检索都接收 `ctx`，且**检查 `ctx.Done()`**
-- [ ] 单路失败不应该让整个查询失败（降级：只返回另一路的结果）
-- [ ] 结果合并时注意**并发写 map 会 panic**
-
-#### 验收标准
-
-- [ ] `CGO_ENABLED=1 go test -race ./...` **全绿**
-- [ ] RRF 测试：单路命中、两路都命中、名次相同、空结果
-- [ ] **tie-break 必须稳定**（同分时按 docID 排序），否则两次查询结果顺序会抖动
-- [ ] 超时测试：注入慢检索，验证 deadline 生效
-- [ ] 降级测试：一路返回 error，另一路仍能出结果
-
-#### 测试方法
-
-```bash
-CGO_ENABLED=1 go test -race -v ./internal/retrieve/
-
-# 重复跑，更容易暴露竞态
-go test -run TestHybrid -race -count=10 ./internal/retrieve/
-```
-
----
-
-### M5 · PostgreSQL 持久化
-
-#### 目标
-
-数据落盘，重启不丢。
-
-#### 交付物
-
-- [ ] `deploy/docker-compose.yml` —— pgvector 容器
-- [ ] `migrations/001_init.sql` —— 建表
-- [ ] `internal/store/store.go` —— 存储接口
-- [ ] `internal/store/memory.go` —— 内存实现
-- [ ] `internal/store/postgres.go` —— pgvector 实现
-- [ ] `internal/store/postgres_test.go` —— 集成测试
-
-#### 建表 SQL 要点
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE chunk (
-    id          bigserial PRIMARY KEY,
-    document_id bigint NOT NULL REFERENCES document(id) ON DELETE CASCADE,
-    ordinal     int    NOT NULL,
-    content     text   NOT NULL,
-    embedding   vector(1024),          -- 必须是 1024，不能是 4096
-    metadata    jsonb,
-    created_at  timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX chunk_embedding_hnsw ON chunk
-    USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-```
-
-#### 必须先做对的三件事
-
-1. **镜像 pin `>= 0.8.6`** —— 修复了 CVE-2026-3172（并行建索引堆溢出，CVSS 8.1）
-2. **`CREATE EXTENSION` 放在 init 脚本里**，不要放 `AfterConnect`
-   —— `docker-entrypoint-initdb.d/` 只在数据目录为空时执行一次；
-   而 `AfterConnect` 会对每条新连接执行一次 DDL，且要求连接用户有 CREATE 权限
-3. **批量导入时先插数据、后建索引** —— 已有 HNSW 索引时插入 100 万条要约 1 小时，
-   无索引只要 45 秒
-
-#### pgx 注意事项
-
-- 用 `pgvector-go` 的 `pgxvec.RegisterTypes(ctx, conn)` 挂在 `AfterConnect` 上
-- `CopyFrom` **强制 binary format**，忘记注册类型会报极具误导性的
-  `vector cannot have more than 16000 dimensions`（维度其实完全正确）
-- `CopyFrom` **不支持 `ON CONFLICT` 和 `RETURNING`**，需要 upsert 时要退回 batch INSERT
-- `CopyFrom` 的表名参数是 `pgx.Identifier` 类型，不是 `string`
-- 连接池在单机 MCP server 场景显式收窄到 `MaxConns = 8~16`
-  （默认值是 `max(4, NumCPU)`，多核机器上会开到几十条）
-
-#### 验收标准
-
-- [ ] `docker compose up -d` 后 `SELECT extversion FROM pg_extension WHERE extname='vector'` 返回 ≥ 0.8.6
-- [ ] **服务重启后数据仍在**（这是本阶段的核心验收点）
-- [ ] 集成测试能在容器起停后重复运行
-- [ ] 带元数据过滤 + 向量排序的 SQL 能正确返回
-
-#### 测试方法
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-go test -v -tags=integration ./internal/store/
-
-# 重启后重跑，验证数据没丢
-docker compose -f deploy/docker-compose.yml restart
-go test -v -tags=integration ./internal/store/
-```
-
----
-
-### M6 · MCP 接入
-
-#### 目标
-
-能被本机 Agent 调用。
-
-#### 交付物
-
-- [ ] `cmd/contextdock/main.go` —— 入口
-- [ ] `internal/mcp/server.go` —— 工具注册
-- [ ] `internal/mcp/import.go` —— `import_document`
-- [ ] `internal/mcp/search.go` —— `search_knowledge_base`
-
-#### 两个工具
-
-| 工具 | 输入 | 输出 |
-| --- | --- | --- |
-| `import_document` | 文本内容 或 文件路径、标题、元数据 | 导入的片段数、文档 ID |
-| `search_knowledge_base` | 查询字符串、top_k | 最相关的片段列表（**不含向量**） |
-
-#### 最大的坑：stdio 模式下 stdout 是协议通道
-
-MCP 官方 SDK 直接把 `os.Stdout` 包成 JSON-RPC 通信管道。
-**一句 `fmt.Println` 就会污染协议流**，而且客户端只会报一个看不懂的解析错误。
-
-```go
-// ❌ 绝对不要
-fmt.Println("imported:", n)
-
-// ✅ 日志走 stderr
-log.Printf("imported: %d", n)     // Go 的 log 包默认写 stderr
-```
-
-#### 验收标准
-
-- [ ] Agent 能发现这两个工具
-- [ ] `import_document` 导入后，`search_knowledge_base` 能搜到
-- [ ] 返回的 JSON 里**不含 embedding 字段**（`json:"-"` 生效）
-- [ ] 错误路径：文件不存在、API Key 无效、数据库断连，都要返回可读的错误而不是崩溃
-
-#### 配置示例
-
-Claude Desktop，Windows：
-
-```json
-{
-  "mcpServers": {
-    "contextdock": {
-      "command": "d:/05_Code/ContextDock/bin/contextdock.exe",
-      "env": { "SILICONFLOW_API_KEY": "sk-xxx" }
-    }
-  }
-}
-```
-
----
-
-### M7 · 性能与文档
-
-#### 目标
-
-把项目变成能讲的简历素材。
-
-#### 交付物
-
-- [ ] benchmark 结果（BM25 / 向量检索 / RRF 各自耗时）
-- [ ] pprof 分析报告（CPU + 内存）
-- [ ] 完整的 README
-- [ ] 简历项目描述
-
-#### 任务清单
-
-- [ ] `go test -bench . -benchmem` 建立性能基线
-- [ ] `go test -cpuprofile=cpu.prof -bench .` 然后 `go tool pprof -http=:8080 cpu.prof`
-- [ ] 找出至少一个真实的性能瓶颈并优化，**记录优化前后的数字**
-- [ ] 补全 README 的架构图和快速开始
-- [ ] 整理面试讲解稿
-
-#### 验收标准
-
-- [ ] 能说清 pprof 火焰图里每一层在干什么
-- [ ] 至少有一处「优化前 X → 优化后 Y」的实测对比
-- [ ] 简历描述里每个技术名词都能被追问三层
-
----
-
-## 关键设计决策
-
-这一节记录**为什么这么选**，避免以后反复讨论。
-
-### 向量维度必须是 1024，不能是 4096
-
-bge-m3 原生输出就是 1024 维，**不做任何截断**。
-
-这个约束来自 pgvector：HNSW/IVFFlat 索引对 `vector` 类型上限 **2000 维**，
-`halfvec` 上限 **4000 维**。如果用 Qwen3-Embedding-8B 的 4096 维，
-**连 `halfvec` 都建不了索引**（4000 < 4096，差 96 维），只能退化成全表顺序扫描。
-
-> 换维度 = 重建表和索引 + 重灌全量向量。这是**整个项目最贵的一次改动**，所以一开始就定死。
-
-### 绝不能给 bge-m3 传 `dimensions` 参数
-
-硅基流动的 `dimensions` 参数**仅对 Qwen/Qwen3 系列生效**。
-对 bge-m3 传会返回 **400 错误**，不是静默忽略。
-
-```go
-// ❌ 会 400
-Dimensions: openai.Int64(1024),
-
-// ✅ 删掉
-```
-
-### 中文分词用字符 bigram
-
-中文没有空格，`"检索系统"` 对 BM25 来说是一个词——直接做等于失效。
-
-bigram 把 `检索系统` 切成 `检索` / `索系` / `系统`：
-
-- 零依赖、纯 Go、约 20 行
-- 中文「未登录词」（词典里没有的新词）问题天然消失
-- **bleve 的 cjk 分析器内部就是这么做的**，有生产级方案背书
-- RAGFlow 自研的 `token_similarity()` 同样用 bigram 且权重更高（unigram 0.4 / bigram 0.6）
-
-> ⚠️ **bigram 不是万能方案**。它只适用于 Han / 平假名 / 片假名。
-> 泰文、老挝文、高棉文、缅文虽然也没有空格，但字母本身没有语义，
-> 必须用词典分词或 LSTM（Lucene 的 `CJKBigramFilter` 明确跳过这些文种）。
-> 本项目第一版**只处理中英混合**，不涉及这些。
-
-### `Chunk.Embedding` 打 `json:"-"`
-
-MCP 工具返回搜索结果时，如果向量被序列化：
-
-```text
-10 条结果 × 1024 维 = 10240 个浮点数 ≈ 100KB 纯数字
-```
-
-而 Agent 拿到这些数字**毫无用处**——它要的只是 `Content`。
-`json:"-"` 从根上堵住这个问题。
-
-### RRF 的 0 号哨兵必须显式防护
-
-`LexicalRank` / `VectorRank` 用 **0 表示「该通道未召回」**。如果把 0 直接代入公式：
-
-```text
-1/(60 + 0) = 0.016667   ← "未召回"，却比第一名还高
-1/(60 + 1) = 0.016393   ← 真正的第一名
-```
-
-**「未召回」会拿到比第一名更高的分。** 这个 bug 不报错，只是排序错乱，
-排查时会先怀疑分词和模型。
-
-防护做进了 `SearchResult.RRFScore()` 方法里，而不是留给调用方写公式——
-漏掉这个判断不会报错，所以不能靠自觉。
-
-### `StableKey()`：RRF 去重不能用 `Chunk.ID`
-
-RRF 要按某个键把两路结果对应起来。最自然的想法是用 `Chunk.ID`——
-但**落库之前所有 chunk 的 ID 都是 0**，两个完全不同的片段会被当成同一条合并，
-RRF 名次整体错乱，而且不报任何错。
-
-规则：已落库用 ID，未落库退化为 `(DocumentID, Ordinal)`。
-**M4 的 RRF 只允许用这个键做映射与去重。**
-
-### `IndexText()`：被索引文本的唯一来源
-
-BM25 的分词、文档长度、倒排，和向量的语义空间，**必须建立在同一个文本上**。
-如果 Embedder 和 BM25 各自拼一次（分隔符不同，或一边忘了拼面包屑），
-两路检索搜的就不是同一个文本，召回不可比、RRF 质量下降，极难排查。
-
-**硬约束：凡是「拿去 embed 或建索引」的代码路径，都不允许直接读 `c.Content`。**
-
-### `MatchedBy()` 是算出来的，不是存出来的
-
-```go
-func (r SearchResult) MatchedBy() []Retriever   // 由 Rank 字段计算
-```
-
-新手容易顺手加一个 `MatchedBy []Retriever` 字段，但那是**冗余状态**：
-它和 `LexicalRank > 0`、`VectorRank > 0` 说的是同一件事，存两份就有不同步的可能。
-
-> **原则：能用已有字段算出来的，就不要存第二份。**
-
-### `SearchResult.Score` 的含义随阶段变化
-
-| 阶段 | Score 的含义 | 典型范围 |
-| --- | --- | --- |
-| 单路检索 | BM25 分 或 余弦相似度 | 0~20 / -1~1 |
-| RRF 融合后 | RRF 分 | 0.01~0.03 |
-
-**不要在代码里假定 Score 有固定取值范围。**
-需要在同一处比较时，永远比较同阶段的分数。
-
----
-
-## 开发避坑清单
-
-踩过的和即将要踩的，都记在这里。
-
-### 环境
-
-#### `-race` 需要 cgo，Windows 上需要 C 编译器
-
-```bash
-# 现象
-go: -race requires cgo; enable cgo by setting CGO_ENABLED=1
-
-# 解决（winget 可用）
-winget install -e --id BrechtSanders.WinLibs.POSIX.UCRT
-
-# 重开终端后
-CGO_ENABLED=1 go test -race ./...
-```
-
-**第四天之前必须装好**——那天要写并行检索，不跑 `-race` 等于蒙眼开车。
-
-### Go 语言
-
-#### `len()` 是字节数，不是字符数
-
-```go
-len("检索")                    // 6，不是 2
-utf8.RuneCountInString("检索") // 2 ✅
-```
-
-中文分块按 `len()` 计长度会切出 1/3 的块大小。
-
-#### 判断汉字用 `unicode.Han`，不是 `Ideographic`
-
-```go
-unicode.Is(unicode.Ideographic, r)  // ❌ 会误收西夏文、女书，还会漏掉 CJK 部首补充区
-unicode.Is(unicode.Han, r)          // ✅
-```
-
-#### 并发写 map 会 panic
-
-M4 做并行检索时会踩到。合并两路结果时要么加锁，要么先收集到各自的切片再合并。
-
-### 外部 API
-
-| 坑 | 说明 |
+| 文档 | 内容 |
 | --- | --- |
-| 单次 input 最多 **32 条** | 超一条整个请求 400，不是截断，必须客户端分块 |
-| 单条最长 **8192 token** | bge-m3 的上限（Qwen3 是 32768，别记混） |
-| 限流是**账户级、按模型**算 | 不是按 API Key；L0 是 RPM 2000 / TPM 1,000,000 |
-| `429` / `503` 可重试，`400/401/403` 不可 | 403 常见原因是**未实名认证**，不是鉴权失败 |
-| `usage.completion_tokens` 非标准字段 | 别开 `DisallowUnknownFields()` |
-
-### 数据库
-
-| 坑 | 说明 |
-| --- | --- |
-| 镜像 pin **≥ 0.8.6** | 修复 CVE-2026-3172（并行建索引堆溢出） |
-| `CREATE EXTENSION` 放 init 脚本 | `AfterConnect` 里做会每条连接执行一次 DDL |
-| 先插数据、后建索引 | 已有索引时插入慢 80 倍 |
-| `ORDER BY` 必须与索引定义逐字一致 | 写错维度会**静默**退化成全表扫描 |
-| HNSW 是近似索引 | 带 `WHERE` 过滤时返回行数可能少于 `LIMIT`，需 `SET hnsw.iterative_scan` |
-
-### 工程习惯
-
-- **`git add -A` 之前先看一眼 `git status`**
-  （曾经有一次工具产生的 104MB 临时文件被扫进提交，需要改写历史清理）
-- `.env` 必须在**第一个 commit 之前**就写进 `.gitignore`
+| [docs/DESIGN.md](docs/DESIGN.md) | 11 条关键设计决策，含被否决的替代方案 |
+| [docs/PITFALLS.md](docs/PITFALLS.md) | 踩过的坑：环境 / Go 语言 / 外部 API / 数据库 |
+| [Issues](https://github.com/XiaoleC05/ContextDock/issues) | 开发任务，一个 issue 一个可交付物 |
 
 ---
 
-## 状态
+## License
 
-🚧 开发中 · `v1.0.0` 进度 **3 / 25 issues**
-
-| 开发阶段 | 状态 |
-| --- | --- |
-| M0 仓库初始化 | ✅ |
-| M1 核心类型 | ✅ |
-| M2 切分与 Embedding | ⬜ |
-| M3 内存检索 | ⬜ |
-| M4 混合排序与并发 | ⬜ |
-| M5 PostgreSQL 持久化 | ⬜ |
-| M6 MCP 接入 | ⬜ |
-| M7 性能与文档 | ⬜ |
+[MIT](LICENSE) © 2026 XiaoleC05
