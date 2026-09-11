@@ -60,9 +60,9 @@ var (
 // Config 是全部运行时配置。
 type Config struct {
 	// Embedding
-	SiliconFlowAPIKey string
+	SiliconFlowAPIKey  string
 	SiliconFlowBaseURL string
-	EmbeddingModel    string
+	EmbeddingModel     string
 
 	// 存储
 	UseMemoryStore bool
