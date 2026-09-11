@@ -142,6 +142,53 @@ MUTATIONS = [
      "internal/embed/fake.go",
      "if strings.TrimSpace(t) == \"\" {",
      "if strings.HasPrefix(t, \"\\x00\") {"),
+
+    # ---- retrieve / BM25 ----
+    ("bm25: IDF 换回 Robertson 原始版（会出负数）",
+     "internal/retrieve/bm25.go",
+     "return math.Log(1 + (n-df+0.5)/(df+0.5))",
+     "return math.Log((n - df + 0.5) / (df + 0.5))"),
+
+    ("bm25: 建索引时直接读 Content 而非 IndexText",
+     "internal/retrieve/bm25.go",
+     "tokens := m.tk.Tokenize(c.IndexText())",
+     "tokens := m.tk.Tokenize(c.Content)"),
+
+    ("bm25: 关闭长度归一化（b=0）",
+     "internal/retrieve/bm25.go",
+     "DefaultB  = 0.75",
+     "DefaultB  = 0"),
+
+    ("bm25: 查询词不去重",
+     "internal/retrieve/bm25.go",
+     "if !seen[q] {",
+     "if true {"),
+
+    ("bm25: 名次改成 0-based",
+     "internal/retrieve/bm25.go",
+     "LexicalRank:  i + 1, // 1-based",
+     "LexicalRank:  i, // 0-based"),
+
+    # ---- retrieve / 向量 ----
+    ("vector: 不除模长（退化成点积）",
+     "internal/retrieve/vector.go",
+     "sim := float64(dot(query, v.vecs[i]) / (qNorm * v.norms[i]))",
+     "sim := float64(dot(query, v.vecs[i]))"),
+
+    ("vector: 不校验查询向量维度",
+     "internal/retrieve/vector.go",
+     "if len(query) != types.EmbeddingDim {",
+     "if false {"),
+
+    ("vector: 零向量查询不报错",
+     "internal/retrieve/vector.go",
+     "if qNorm == 0 {\n\t\treturn nil, ErrZeroVector\n\t}",
+     "if false {\n\t\treturn nil, ErrZeroVector\n\t}"),
+
+    ("vector: 不跳过零模长文档",
+     "internal/retrieve/vector.go",
+     "if v.norms[i] == 0 {\n\t\t\tcontinue\n\t\t}",
+     "if false {\n\t\t\tcontinue\n\t\t}"),
 ]
 
 
