@@ -100,3 +100,16 @@ jobs:
         env:
           CONTEXTDOCK_TEST_DSN: "postgres://postgres:postgres@localhost:5432/contextdock?sslmode=disable"
         run: go test -v -tags=integration ./internal/store/
+
+      # 端到端冒烟测试：把二进制当 MCP server 跑起来，用 stdio 发 JSON-RPC。
+      # 单元测试覆盖不到的接缝（stdio 协议、stdout 是否被日志污染、
+      # 工具 schema、降级链路）只有这里能验证。
+      - name: Build binary
+        run: go build -o bin/contextdock ./cmd/contextdock
+
+      - name: MCP end-to-end smoke test
+        env:
+          CONTEXTDOCK_DATABASE_URL: "postgres://postgres:postgres@localhost:5432/contextdock?sslmode=disable"
+          # 故意用假 Key，验证"嵌入失败时降级到关键词检索"这条真实故障路径
+          SILICONFLOW_API_KEY: "sk-fake-key-for-ci"
+        run: python3 scripts/smoke.py bin/contextdock
