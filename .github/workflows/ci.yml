@@ -54,6 +54,11 @@ jobs:
           fi
           echo "未发现 .env 泄漏"
 
+      # 文档格式校验。配置在仓库根的 .markdownlint.json。
+      # 命令和本地跑的一模一样，避免"本地过了 CI 挂"。
+      - name: Lint markdown
+        run: npx --yes markdownlint-cli2 "**/*.md"
+
   integration:
     name: Integration (PostgreSQL + pgvector)
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@
 ContextDock 是一个**本机运行**的 MCP Server。它把文档切分成片段、生成向量、存入 PostgreSQL，
 并在 Agent 提问时用「关键词检索 + 向量检索 + RRF 融合」找出最相关的片段返回。
 
-> 🚧 **开发中** · 目标版本 [`v1.0.0`](https://github.com/XiaoleC05/ContextDock/milestone/9)，
+> ✅ **可用** · 目标版本 [`v1.0.0`](https://github.com/XiaoleC05/ContextDock/milestone/9)，
 > 进度见上方徽章（实时读取，不需要手动维护）
 
 ---
@@ -80,7 +80,11 @@ go vet ./...
 go test ./...
 ```
 
-**当前可运行的部分**：核心类型（`internal/types`），25 个测试用例，覆盖率 96.2%。
+编译产出可执行文件：
+
+```bash
+go build -o bin/contextdock.exe ./cmd/contextdock
+```
 
 ### 配置 API Key
 
@@ -97,8 +101,6 @@ SILICONFLOW_API_KEY=sk-xxxxxxxx
 ---
 
 ## 用法
-
-> ⏳ M6 完成后可用。以下为目标形态。
 
 ### MCP 工具
 
@@ -171,18 +173,22 @@ Claude Desktop（Windows），编辑 `%APPDATA%\Claude\claude_desktop_config.jso
 
 ```text
 ContextDock/
-├── cmd/contextdock/       # 程序入口，组装依赖
+├── cmd/contextdock/       # 程序入口：依赖注入的组装点
 ├── internal/
-│   ├── types/             # ✅ 核心数据结构
-│   ├── chunk/             # 文档切分
-│   ├── tokenize/          # 中英分流分词器
+│   ├── types/             # 核心数据结构（零值语义、校验）
+│   ├── config/            # 配置加载与启动期校验
+│   ├── tokenize/          # 按书写系统分流的分词器
+│   ├── chunk/             # 文档切分（按标题分层 + 句边界）
 │   ├── embed/             # Embedder 接口 + Fake + SiliconFlow
-│   ├── retrieve/          # bm25 / vector / rrf
-│   ├── store/             # 存储接口 + memory + postgres
-│   └── mcp/               # MCP 工具注册
-├── docs/                  # 设计与避坑文档
+│   ├── ingest/            # 导入编排：切分 → 嵌入 → 落库
+│   ├── retrieve/          # BM25 / 向量 / RRF / 并行检索
+│   ├── store/             # 存储接口 + 内存实现 + pgvector 实现
+│   ├── service/           # 应用门面：索引重建、降级策略
+│   └── mcp/               # MCP 工具注册（薄适配器）
+├── docs/                  # 设计、避坑、性能文档
 ├── migrations/            # 建表 SQL
-└── deploy/                # docker-compose
+├── deploy/                # docker-compose
+└── scripts/               # 变异测试、端到端冒烟测试
 ```
 
 ---
@@ -216,23 +222,56 @@ ContextDock/
 ## 测试
 
 ```bash
-go test ./...                              # 全部测试
+go test ./...                              # 全部单元测试
 go test -v ./...                           # 带用例名
 go test -cover ./...                       # 覆盖率
-CGO_ENABLED=1 go test -race ./...          # 竞态检测（需要 C 编译器）
+go test -race ./...                        # 竞态检测（需要 C 编译器）
 go test -bench . -benchmem ./...           # 性能基准
 ```
 
-**测试有效性用变异测试验证**——覆盖率高不代表测试有效。
-本项目通过故意植入 bug 来确认测试会失败（7/7 被捕获）：
+### 集成测试（需要数据库）
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+go test -v -tags=integration ./internal/store/
+```
+
+覆盖真实数据库的往返、向量读写、级联删除、事务回滚，
+以及**重启后从库重建索引**。
+
+### 端到端冒烟测试
+
+```bash
+python scripts/smoke.py bin/contextdock.exe
+```
+
+把二进制当 MCP server 跑起来，用 stdio 发 JSON-RPC——
+验证握手、工具发现、导入、检索，以及**嵌入失败时的降级链路**。
+单元测试覆盖不到的接缝（比如 stdout 被日志污染）只有这里能发现。
+
+### 测试有效性用变异测试验证
+
+**覆盖率高不代表测试有效。** 本项目用 `scripts/mutate.py` 故意在源码里植入 bug，
+确认测试会失败：
+
+```bash
+python scripts/mutate.py          # 全部
+python scripts/mutate.py bm25     # 只跑名字含 bm25 的
+```
+
+当前 **36/36 个变异全部被捕获**。它能发现的问题很具体，例如：
 
 | 植入的 bug | 抓住它的测试 |
 | --- | --- |
 | 删掉 `Embedding` 的 `json:"-"` | `TestChunkJSONKeySetIsExact` |
-| 删掉 RRF 的 `rank <= 0` 防护 | `TestRRFScoreIgnoresUnrecalledChannel` |
+| RRF 去重改用 `Chunk.ID`（落库前全是 0） | `TestFuseRRFUsesStableKeyNotID` |
+| RRF 直接把 0 号名次代入公式 | `TestRRFScoreIgnoresUnrecalledChannel` |
+| 请求体里加上 `dimensions` 字段 | `TestRequestHasNoDimensionsField` |
+| BM25 建索引时直接读 `Content` 而非 `IndexText` | `TestBM25IndexesHeadingBreadcrumb` |
+| 单路检索失败就让整个查询失败 | `TestHybridDegradesWhenOnePathFails` |
 | `truncateRunes` 改成按字节截断 | `TestTruncateRunesHandlesMultiByte` |
 
-> 这条来自一个真实教训：最初的断言用 `strings.Contains(raw, "embedding")`（小写），
+> 这条实践来自一个真实教训：最初的断言用 `strings.Contains(raw, "embedding")`（小写），
 > 而 Go 序列化出的是 `"Embedding"`（**大写 E**）——大小写不匹配导致断言**永不触发**，
 > 删掉 `json:"-"` 测试照样绿。详见 [docs/PITFALLS.md](docs/PITFALLS.md)。
 
@@ -242,7 +281,11 @@ go test -bench . -benchmem ./...           # 性能基准
 
 - 只处理 **中英混合**的文本；其他语种（泰/老/高棉等无空格语言）需要词典分词，未实现
 - 只支持 `.txt` / `.md` 和直接传入的文本，**不含 PDF / Word 解析**
-- BM25 是**内存索引**，每次启动需从数据库重建，大文档库下启动会变慢
+- **内存检索是暴力扫描**：`internal/retrieve` 的向量检索会对全部向量算一遍余弦相似度。
+  千级片段是毫秒级，但十万级以上应当走 pgvector 的 HNSW 索引（建表时已经建好了，
+  目前检索路径还没用它）
+- **BM25 是内存索引**，每次启动从数据库全量重建，大文档库下启动会变慢
+- 切分参数（400 字 / 60 字重叠）是**社区经验值**，没有用真实查询集做 recall 评测校准
 - 第一版**无并发写入保护**，不适合多进程同时导入
 - 未做多租户隔离，单机单用户场景
 
@@ -254,6 +297,7 @@ go test -bench . -benchmem ./...           # 性能基准
 | --- | --- |
 | [docs/DESIGN.md](docs/DESIGN.md) | 11 条关键设计决策，含被否决的替代方案 |
 | [docs/PITFALLS.md](docs/PITFALLS.md) | 踩过的坑：环境 / Go 语言 / 外部 API / 数据库 |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | 性能基准与优化记录（含 pprof 分析） |
 | [Issues](https://github.com/XiaoleC05/ContextDock/issues) | 开发任务，一个 issue 一个可交付物 |
 
 ---

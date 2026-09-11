@@ -28,6 +28,18 @@ type BM25 struct {
 	tfs   []map[string]int // 每篇文档的词频
 	df    map[string]int   // 每个词出现在多少篇文档里
 	avgdl float64          // 平均文档长度（token 数）
+
+	// docLens[i] 是第 i 篇文档的 token 数，即 BM25 里的 |D|。
+	//
+	// 在索引时算好存下来，而不是每次查询时遍历词频 map 去数。
+	// 后者是查询热路径上的 O(词数) 操作，白白浪费。
+	docLens []int
+
+	// normCache[i] = k1 * (1 - b + b * docLens[i] / avgdl)
+	//
+	// 这一项只和文档有关、和查询无关，所以在索引时算一次。
+	// 放在查询循环里的话，每个文档对每个查询词项都要重算一次除法。
+	normCache []float64
 }
 
 // NewBM25 创建一个 BM25 检索器。
@@ -60,6 +72,8 @@ func (m *BM25) Index(chunks []types.Chunk) {
 
 	m.tfs = make([]map[string]int, len(chunks))
 	m.df = make(map[string]int, len(chunks)*8)
+	m.docLens = make([]int, len(chunks))
+	m.normCache = make([]float64, len(chunks))
 
 	var totalTokens int
 	for i, c := range chunks {
@@ -69,6 +83,7 @@ func (m *BM25) Index(chunks []types.Chunk) {
 			tf[t]++
 		}
 		m.tfs[i] = tf
+		m.docLens[i] = len(tokens)
 		totalTokens += len(tokens)
 
 		// df 统计的是「出现在多少篇文档里」，不是总词频，
@@ -82,6 +97,15 @@ func (m *BM25) Index(chunks []types.Chunk) {
 		m.avgdl = float64(totalTokens) / float64(len(chunks))
 	} else {
 		m.avgdl = 0
+	}
+
+	// 第二遍：avgdl 要等全部文档统计完才知道，所以归一化因子只能在这里算。
+	for i, dl := range m.docLens {
+		if m.avgdl > 0 {
+			m.normCache[i] = m.k1 * (1 - m.b + m.b*float64(dl)/m.avgdl)
+		} else {
+			m.normCache[i] = m.k1
+		}
 	}
 }
 
@@ -120,7 +144,9 @@ func (m *BM25) Search(query string, topK int) []types.SearchResult {
 	items := make([]scored, 0, len(m.docs))
 	for i, doc := range m.docs {
 		tf := m.tfs[i]
-		dl := float64(tokenCount(tf))
+		// 长度归一化因子在索引时就算好了，这里直接取。
+		// 之前是每次查询都遍历词频 map 数 token 数、再算一遍除法。
+		norm := m.normCache[i]
 
 		var score float64
 		for _, q := range uniq {
@@ -136,7 +162,7 @@ func (m *BM25) Search(query string, topK int) []types.SearchResult {
 				// df 为 0 时 IDF 确实大，但乘上 tf=0 就归零了。
 				continue
 			}
-			score += m.idf(q, n) * (f * (m.k1 + 1)) / (f + m.k1*(1-m.b+m.b*dl/m.avgdl))
+			score += m.idf(q, n) * (f * (m.k1 + 1)) / (f + norm)
 		}
 
 		if score > 0 {
@@ -170,14 +196,9 @@ func (m *BM25) idf(term string, n float64) float64 {
 	return math.Log(1 + (n-df+0.5)/(df+0.5))
 }
 
-// tokenCount 求一篇文档的总词数，即 BM25 里的 |D|。
+// 文档长度 |D| 用 **token 数**而不是字符数或字节数：
+// BM25 的长度归一化建立在词数上。中文走 bigram，
+// 所以「检索系统」算 3 个 token 而不是 4 个字符。
 //
-// 用 token 数而不是字符数或字节数：BM25 的长度归一化建立在词数上。
-// 中文走 bigram，所以「检索系统」算 3 个 token 而不是 4 个字符。
-func tokenCount(tf map[string]int) int {
-	n := 0
-	for _, c := range tf {
-		n += c
-	}
-	return n
-}
+// 这个值在 Index 时一次性算好存进 docLens —— 之前是在每次查询里
+// 遍历词频 map 现数，属于查询热路径上的浪费。
