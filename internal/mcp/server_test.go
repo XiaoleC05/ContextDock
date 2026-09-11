@@ -206,6 +206,66 @@ func TestSearchAfterImport(t *testing.T) {
 	}
 }
 
+// TestSearchReturnsSource 验证溯源字段真的被填上了。
+//
+// 这条用例的存在本身就是个教训。`ResultItem.Source` 曾经声明了、
+// 还带着 jsonschema 描述（Agent 在 tools/list 里看得见），
+// 但 `toResultItem` **从不给它赋值**；而 Source 挂在 Document 上、
+// 检索路径里走的只有 Chunk —— 于是它**永远是空的**。
+//
+// 为什么之前的测试全绿也没发现：DTO 里有这个字段、schema 里有这个条目，
+// 但没有任何用例断言过它的**值**。声明 ≠ 赋值 ≠ 有测试。
+func TestSearchReturnsSource(t *testing.T) {
+	svc := newTestService(t)
+
+	callImport(t, svc, ImportInput{
+		Title:   "部署手册",
+		Source:  "docs/deploy.md",
+		Content: "灰度发布的第一步是先切百分之五的流量，观察错误率再决定要不要继续放量。",
+	})
+
+	out := callSearch(t, svc, SearchInput{Query: "灰度发布怎么开始", TopK: 5})
+	if out.Count == 0 {
+		t.Fatal("应当能搜到刚导入的内容")
+	}
+	if got := out.Results[0].Source; got != "docs/deploy.md" {
+		t.Errorf("结果应当带上文档来源：期望 %q，实际 %q", "docs/deploy.md", got)
+	}
+
+	// 光断言结构体字段还不够。这个字段带 omitempty，
+	// 空值会被**静默**从 JSON 里抹掉——那正是它当初的失效形态：
+	// 结构体里明明有字段，Agent 收到的东西里却没有。
+	// 所以这里断言的是序列化之后的字节。
+	raw, err := json.Marshal(out.Results[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"source":"docs/deploy.md"`) {
+		t.Errorf("source 必须出现在序列化结果里，实际: %s", raw)
+	}
+}
+
+// TestSearchSourceDefaultsToInline 验证省略 source 时的兜底值能一路透传到结果。
+//
+// 兜底在 MCP 层做（firstNonEmpty(in.Source, "inline")），
+// 这条用例同时覆盖了"导入时兜底"和"检索时透传"是接上的——
+// 任何一端断了，这里都会红。
+func TestSearchSourceDefaultsToInline(t *testing.T) {
+	svc := newTestService(t)
+	callImport(t, svc, ImportInput{
+		Title:   "随手记",
+		Content: "向量检索是暴力扫描，千级片段下耗时在毫秒级。",
+	})
+
+	out := callSearch(t, svc, SearchInput{Query: "暴力扫描的耗时", TopK: 5})
+	if out.Count == 0 {
+		t.Fatal("应当有结果")
+	}
+	if got := out.Results[0].Source; got != "inline" {
+		t.Errorf("省略 source 时应兜底为 %q，实际 %q", "inline", got)
+	}
+}
+
 func TestSearchEmptyQuery(t *testing.T) {
 	svc := newTestService(t)
 	h := HandleSearch(svc)

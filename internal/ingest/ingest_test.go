@@ -118,6 +118,67 @@ func TestIngestUsesIndexText(t *testing.T) {
 //
 // 注意：分批实现在 embed 包里（API 客户端知道自己的限制），
 // ingest 只管把全部文本交出去。这个测试验证的是**整条链路**上的保证。
+// TestIngestSinksDocumentSourceIntoChunks 验证文档来源被下沉到每个片段的元数据。
+//
+// 为什么要下沉：检索返回的是**片段**，SearchResult 内嵌的是 Chunk，
+// 而 Source 是 Document 上的字段——检索路径里根本没有 Document。
+// 不在这条链路里存一份，MCP 的输出就永远填不出 source。
+//
+// ⚠️ 这份测试必须留在 ingest 包里，不能只靠 mcp 包的同名用例。
+// 变异测试是**按包**跑的（go test ./<被变异的包>/...），
+// 只在 mcp 里测的话，ingest 这段逻辑被改坏了也没人发现——
+// 这不是假设，加这条用例之前，"不下沉来源"这个变异就是 MISSED。
+func TestIngestSinksDocumentSourceIntoChunks(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	doc := &types.Document{Title: "部署手册", Source: "docs/deploy.md", Content: longContent(10)}
+	if _, err := g.Ingest(ctx, doc); err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+
+	chunks, err := st.AllChunks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("应当切出片段")
+	}
+	for _, c := range chunks {
+		if got := c.Metadata[types.MetadataKeySource]; got != "docs/deploy.md" {
+			t.Errorf("片段 %d 的来源元数据不对：期望 %q，实际 %q",
+				c.Ordinal, "docs/deploy.md", got)
+		}
+	}
+}
+
+// TestIngestSkipsEmptySource 验证来源为空时**不写入**该元数据键。
+//
+// 写一个空字符串进去，MCP 层虽然会被 omitempty 挡住，
+// 但库里会留下一堆 `"source": ""`，而且和"这份文档本来就没有来源"
+// 没法区分——空值和缺失混在一起，将来想做迁移就分不清了。
+func TestIngestSkipsEmptySource(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	doc := &types.Document{Title: "无来源文档", Content: longContent(5)}
+	if _, err := g.Ingest(ctx, doc); err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+
+	chunks, err := st.AllChunks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range chunks {
+		if v, ok := c.Metadata[types.MetadataKeySource]; ok {
+			t.Errorf("来源为空时不该写入该键，片段 %d 里却是 %q", c.Ordinal, v)
+		}
+	}
+}
+
 func TestIngestBatchesAt32EndToEnd(t *testing.T) {
 	ctx := context.Background()
 

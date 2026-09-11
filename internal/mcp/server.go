@@ -250,6 +250,11 @@ func toResultItem(r types.SearchResult) ResultItem {
 		Score:   r.Score,
 		Ordinal: r.Chunk.Ordinal,
 		Heading: r.Chunk.Metadata[types.MetadataKeyHeading],
+		// Source 来自**片段元数据**，不是 Document ——
+		// 检索路径里根本没有 Document，它由 ingest 在导入时下沉进来。
+		// 这个字段曾经声明了却从不赋值（DTO 声明 ≠ 有人填），
+		// 结果是 Agent 拿不到任何溯源信息。见 TestSearchReturnsSource。
+		Source: r.Chunk.Metadata[types.MetadataKeySource],
 	}
 	for _, m := range r.MatchedBy() {
 		item.MatchedBy = append(item.MatchedBy, string(m))

@@ -244,6 +244,18 @@ func TestIndexText(t *testing.T) {
 	if empty.IndexText() != empty.Content {
 		t.Errorf("空面包屑应退化为 Content，实际 %q", empty.IndexText())
 	}
+
+	// 文档来源**不进**索引文本，即使和面包屑同时存在。
+	//
+	// 文件路径里全是 `d`、`05`、`code`、`exe` 这类噪声 token。
+	// 一旦有人顺手把它拼进来，BM25 和向量搜的文本就变了——
+	// 检索质量下降但**不报任何错**，而且现有索引全部作废。
+	withSource := Chunk{DocumentID: 1, Content: "运行 go build"}
+	withSource.SetMetadata(MetadataKeyHeading, "安装指南 > 快速开始")
+	withSource.SetMetadata(MetadataKeySource, "d:/05_Code/ContextDock/README.md")
+	if got := withSource.IndexText(); got != want {
+		t.Errorf("来源不该进索引文本:\n期望 %q\n实际 %q", want, got)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -76,6 +76,23 @@ func (g *Ingester) Ingest(ctx context.Context, doc *types.Document) (*Result, er
 		return nil, store.ErrNoChunks
 	}
 
+	// ---- 1.5. 把文档级来源下沉到每个片段 ----
+	//
+	// 检索返回的是片段，不是文档；SearchResult 内嵌的是 Chunk，
+	// 而 Chunk 上并没有 Source 字段。不在这里存一份的话，
+	// 检索路径就**永远无法**回答"这条内容出自哪儿"。
+	//
+	// 必须赶在 SaveDocument 之前写入——那一步就把 metadata 序列化落库了，
+	// 之后再改内存里的副本不会影响库里已经写下的行。
+	//
+	// Source 为空时跳过，避免往 metadata 里塞一个空字符串。
+	if doc.Source != "" {
+		for i := range chunks {
+			// 走 SetMetadata，它负责初始化 nil map。
+			chunks[i].SetMetadata(types.MetadataKeySource, doc.Source)
+		}
+	}
+
 	// ---- 2. 落库（拿到片段 ID）----
 	saved, err := g.store.SaveDocument(ctx, doc, chunks)
 	if err != nil {

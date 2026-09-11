@@ -23,6 +23,19 @@ const EmbeddingDim = 1024
 const (
 	// MetadataKeyHeading 存放标题面包屑，例如 "安装指南 > 快速开始"。
 	MetadataKeyHeading = "heading"
+
+	// MetadataKeySource 存放文档来源（文件路径，或 "inline"）。
+	//
+	// 为什么要把**文档级**的属性下沉到每个片段里：
+	// 检索返回的是一条条片段，而片段自己不知道出自哪篇文档。
+	// SearchResult 内嵌的是 Chunk 而不是 Document，拿到 source 无从谈起。
+	// 在片段的元数据里存一份，检索路径才能在不额外查库的前提下回答
+	// "这条内容是哪儿来的"。
+	//
+	// ⚠️ 它**不参与 IndexText()**（那里只拼 heading）。
+	// 文件路径塞进索引文本只会引入 `d`、`05`、`code` 这类噪声 token，
+	// 并且会改变 embedding 语义、让现有索引全部失效。
+	MetadataKeySource = "source"
 )
 
 // ErrNilChunk 之类的哨兵错误，供调用方用 errors.Is 判断。
