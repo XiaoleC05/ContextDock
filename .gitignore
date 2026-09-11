@@ -32,6 +32,9 @@ mem.prof
 /tmp/
 *.log
 
+# ---- 调研笔记（本地留存，不入库）----
+/.notes/
+
 # ---- IDE ----
 .idea/
 .vscode/*
