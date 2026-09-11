@@ -45,12 +45,15 @@ class Server:
     """驱动一个 stdio MCP server 子进程。"""
 
     def __init__(self, exe, env):
+        # exe 必须是绝对路径：Windows 上 CreateProcess 不认相对路径。
+        # cwd 固定成仓库根，这样二进制能找到 .env（它按 CWD 相对查找）。
         self.proc = subprocess.Popen(
-            [exe],
+            [os.path.abspath(exe)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            cwd=ROOT,
             bufsize=0,
         )
         self.stderr_lines = []

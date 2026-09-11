@@ -114,7 +114,9 @@ M4 做并行检索时会踩到。合并两路结果时：先各自收集到切�
 | 坑 | 说明 |
 | --- | --- |
 | ✅ **绝对不能传 `dimensions`** | 仅对 Qwen3 系列生效，对 bge-m3 传会 **400**，不是静默忽略 |
-| ⚠️ 单次 input 最多 **32 条** | 超一条**整个请求** 400（`input batch size N > maximum allowed batch size 32`），不是截断，必须客户端分块 |
+| ✅ **实测维度** | `Pro/BAAI/bge-m3` = **1024**；`Qwen/Qwen3-Embedding-8B` = 4096 |
+| ⚠️ 单次 input 文档写的是 **32 条** | 超一条**整个请求** 400（`input batch size N > maximum allowed batch size 32`），不是截断，必须客户端分块 |
+| ✅ **但 32 条实际上没有强制执行** | 2026-09-12 实测单次 **256 条**正常返回 200。仍然按 32 分批——文档写的就是 32，别的账号或模型可能真会拒。保守分块只慢一点，撞上限是整个请求失败 |
 | ⚠️ 单条最长 **8192 token** | bge-m3 的上限（Qwen3 是 32768，别记混） |
 | ⚠️ 限流是**账户级、按模型**算 | 不是按 API Key。L0 是 RPM 2000 / TPM 1,000,000 |
 | ⚠️ `429` / `503` / `504` 可重试 | `400` / `401` / `403` **不可重试** |
@@ -124,6 +126,34 @@ M4 做并行检索时会踩到。合并两路结果时：先各自收集到切�
 | ⚠️ 长文本 embedding 耗时较长 | http client 超时别设太短（建议 60s+） |
 | ⚠️ 文档站已迁移 | 老的 `docs.siliconflow.cn/en/...` 路径全部 404，现在是 `docs.siliconflow.com` |
 | ⚠️ GitHub 上的官方 `openapi.yaml` 已过期 | 还停留在只有 bge 系列、没有 `dimensions` 字段的版本，别拿它当依据 |
+
+### ✅ Windows 上 `curl.exe` 会把中文参数搞坏
+
+**排查了一个多小时，最后发现 API 一直是好的，是命令行工具的问题。**
+
+同一个端点、同一个 Key、同样的中文内容：
+
+```bash
+# ❌ 报 20015 "The parameter is invalid"
+curl -d '{"model":"Pro/BAAI/bge-m3","input":["测试"]}' https://api.siliconflow.cn/v1/embeddings
+
+# ✅ 正常返回
+curl -d @req.json https://api.siliconflow.cn/v1/embeddings
+```
+
+**原因**：`curl.exe` 是 C 程序，在 Windows 上从命令行读参数走的是 **ANSI 代码页**（中文系统上是 GBK），
+不是 UTF-8。中文被转成 GBK 字节后，服务端按 UTF-8 解码就是非法字符。
+
+**怎么识别**：
+
+- 错误码是**参数无效**（20015），而不是鉴权或模型不存在
+- **换英文内容就正常** —— 这是最关键的信号
+- `echo '测试' | xxd` 会显示正确的 UTF-8，但那只证明 **bash** 没问题，**不代表 curl 发出的字节是对的**
+
+**规避**：非 ASCII 内容一律用 `-d @file` 或 `--data-binary @file`。
+
+> 这跟本项目自己的代码**无关**——Go 的 `encoding/json` 序列化出来就是标准 UTF-8。
+> 只有手工用 curl 做验证时才会踩到。
 
 ---
 
