@@ -230,7 +230,8 @@ ContextDock/
 - [x] `internal/types/document.go` —— `Document`
 - [x] `internal/types/chunk.go` —— `Chunk`
 - [x] `internal/types/search.go` —— `Retriever` / `SearchResult`
-- [x] `internal/types/types_test.go` —— 4 个测试
+- [x] `internal/types/types_test.go` —— 25 个用例，覆盖率 96.2%
+- [x] 通过**变异测试**验证测试有效性（7/7 变异被抓到，见下）
 
 #### 验收结果
 
@@ -239,29 +240,63 @@ ContextDock/
 | `go build ./...` | ✅ |
 | `go vet ./...` | ✅ |
 | `gofmt -l .` | ✅ |
-| `go test ./...` | ✅ 4 passed |
+| `go test ./...` | ✅ 25 passed，覆盖率 96.2% |
 | `go test -race ./...` | ⏸ 延后到 M4 前（需先装 C 编译器） |
+
+#### 测试有效性用变异测试验证
+
+覆盖率高不代表测试有效。本阶段的测试用**变异测试**验证过：故意在源码里植入
+bug，确认测试会失败。7 个变异全部被抓到：
+
+| 变异 | 抓住它的测试 |
+| --- | --- |
+| 删掉 `Embedding` 的 `json:"-"` | `TestChunkJSONKeySetIsExact` |
+| 删掉 RRF 的 `rank <= 0` 防护 | `TestRRFScoreIgnoresUnrecalledChannel` |
+| 删掉 `SetMetadata` 的 nil 初始化 | `TestEmptyMetadataOmitted` |
+| `EmbeddingDim` 1024 → 768 | `TestChunkValidate` |
+| `RRFK` 60 → 10 | `TestRRFConstantIsCanonical` |
+| 删掉 `Validate` 的维度检查 | `TestChunkValidate` |
+| `truncateRunes` 改成按字节截断 | `TestTruncateRunesHandlesMultiByte` |
+
+> ⚠️ **踩过的坑**：本文件最初的 `TestChunkEmbeddingIsNotSerialized` 用
+> `strings.Contains(raw, "embedding")`（小写）做断言，而 Go 在没有 json 标签时
+> 序列化出的键是 `"Embedding"`（**大写 E**）。大小写不匹配导致断言**永远不触发**——
+> 删掉 `json:"-"` 它照样绿。已改为**按键集合精确断言**。
 
 #### 核心契约
 
 ```go
+const EmbeddingDim = 1024   // 全项目唯一真值来源
+const RRFK = 60             // RRF 平滑常数（SIGIR 2009 论文推荐值）
+
 // 检索的最小单位
 type Chunk struct {
     ID         int64
-    DocumentID int64
-    Ordinal    int      // 在文档中的序号，0-based
+    DocumentID int64   // 零值是非法值
+    Ordinal    int     // 0-based；⚠️ 0 是合法值，不能当哨兵
     Content    string
     Embedding  []float32 `json:"-"`  // 关键：永不序列化
-    Metadata   map[string]string
+    Metadata   map[string]string     // ⚠️ 裸 map，写入请用 SetMetadata
 }
+
+// Chunk 上必须遵守的方法契约
+func (c *Chunk) SetMetadata(k, v string)  // nil 安全
+func (c Chunk) IndexText() string         // 被索引文本的唯一来源
+func (c Chunk) StableKey() string         // 跨通道融合键，RRF 去重只能用这个
+func (c Chunk) Validate() error           // 收敛校验规则
+func (c Chunk) String() string            // 防止日志打 1024 个浮点数
 
 // 一条检索结果
 type SearchResult struct {
-    Chunk       Chunk
-    Score       float64    // 含义随阶段变化，见"关键设计决策"
-    LexicalRank int        // 1-based，0 = 该通道未召回
-    VectorRank  int
+    Chunk        Chunk
+    Score        float64   // 含义随阶段变化，见"关键设计决策"
+    LexicalScore float64   // 原始分，0 = 该通道未召回
+    VectorScore  float64
+    LexicalRank  int       // 1-based，⚠️ 0 = 未召回，不是第 0 名
+    VectorRank   int
 }
+
+func (r SearchResult) RRFScore(k int) float64  // 内部已处理 0 号哨兵
 ```
 
 ---
@@ -669,6 +704,38 @@ MCP 工具返回搜索结果时，如果向量被序列化：
 
 而 Agent 拿到这些数字**毫无用处**——它要的只是 `Content`。
 `json:"-"` 从根上堵住这个问题。
+
+### RRF 的 0 号哨兵必须显式防护
+
+`LexicalRank` / `VectorRank` 用 **0 表示「该通道未召回」**。如果把 0 直接代入公式：
+
+```text
+1/(60 + 0) = 0.016667   ← "未召回"，却比第一名还高
+1/(60 + 1) = 0.016393   ← 真正的第一名
+```
+
+**「未召回」会拿到比第一名更高的分。** 这个 bug 不报错，只是排序错乱，
+排查时会先怀疑分词和模型。
+
+防护做进了 `SearchResult.RRFScore()` 方法里，而不是留给调用方写公式——
+漏掉这个判断不会报错，所以不能靠自觉。
+
+### `StableKey()`：RRF 去重不能用 `Chunk.ID`
+
+RRF 要按某个键把两路结果对应起来。最自然的想法是用 `Chunk.ID`——
+但**落库之前所有 chunk 的 ID 都是 0**，两个完全不同的片段会被当成同一条合并，
+RRF 名次整体错乱，而且不报任何错。
+
+规则：已落库用 ID，未落库退化为 `(DocumentID, Ordinal)`。
+**M4 的 RRF 只允许用这个键做映射与去重。**
+
+### `IndexText()`：被索引文本的唯一来源
+
+BM25 的分词、文档长度、倒排，和向量的语义空间，**必须建立在同一个文本上**。
+如果 Embedder 和 BM25 各自拼一次（分隔符不同，或一边忘了拼面包屑），
+两路检索搜的就不是同一个文本，召回不可比、RRF 质量下降，极难排查。
+
+**硬约束：凡是「拿去 embed 或建索引」的代码路径，都不允许直接读 `c.Content`。**
 
 ### `MatchedBy()` 是算出来的，不是存出来的
 
