@@ -53,3 +53,50 @@ jobs:
             exit 1
           fi
           echo "未发现 .env 泄漏"
+
+  integration:
+    name: Integration (PostgreSQL + pgvector)
+    runs-on: ubuntu-latest
+
+    # 起一个真实的 pgvector 数据库来跑集成测试。
+    #
+    # 本机 Docker 拉不动 Docker Hub 时这个 job 仍然能跑——
+    # 所以它是"持久化代码是否真的能用"的唯一常态化保证。
+    services:
+      postgres:
+        # ⚠️ 版本写死，且必须 >= 0.8.6（修复 CVE-2026-3172）
+        image: pgvector/pgvector:0.8.6-pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: contextdock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d contextdock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # service 容器和 job 在同一个网络里，所以直接用 localhost。
+      # 建表脚本挂在 runner 上不会被 service 容器执行（那只认容器内的
+      # docker-entrypoint-initdb.d），所以这里手动跑一遍。
+      - name: Apply migrations
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d contextdock -f migrations/001_init.sql
+
+      - name: Run integration tests
+        env:
+          CONTEXTDOCK_TEST_DSN: "postgres://postgres:postgres@localhost:5432/contextdock?sslmode=disable"
+        run: go test -v -tags=integration ./internal/store/
