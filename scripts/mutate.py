@@ -68,6 +68,44 @@ MUTATIONS = [
      "internal/tokenize/tokenizer.go",
      "if s == \"\" {\n\t\treturn []string{}\n\t}",
      "if s == \"\" {\n\t\treturn nil\n\t}"),
+
+    # ---- chunk ----
+    # 这条对应开发时真实踩到的 bug：hitEnd 在去空白之前算，
+    # 改成 false 后短段落会退化成一个字符一段。
+    ("chunk: 破坏 hitEnd 判断（真实踩过的 bug）",
+     "internal/chunk/chunker.go",
+     "hitEnd := end >= sec.end",
+     "hitEnd := false"),
+
+    ("chunk: 不写标题面包屑",
+     "internal/chunk/chunker.go",
+     "if sec.breadcrumb != \"\" {",
+     "if false {"),
+
+    ("chunk: 取消片段重叠",
+     "internal/chunk/chunker.go",
+     "next := end - c.cfg.OverlapRunes",
+     "next := end"),
+
+    ("chunk: #hashtag 被误判为标题",
+     "internal/chunk/chunker.go",
+     "if n < len(line) && line[n] != ' ' && line[n] != '\\t' {\n\t\treturn 0, \"\", false\n\t}",
+     "if false {\n\t\treturn 0, \"\", false\n\t}"),
+
+    ("chunk: isSpace 不识别全角空格",
+     "internal/chunk/chunker.go",
+     "return unicode.IsSpace(r)",
+     "return unicode.IsSpace(r) && r < 0x80"),
+
+    ("chunk: 不校验 overlap < maxRunes",
+     "internal/chunk/chunker.go",
+     "if c.OverlapRunes >= c.MaxRunes {",
+     "if false {"),
+
+    ("chunk: 不在句末标点断开",
+     "internal/chunk/chunker.go",
+     "} else if brk := lastSentenceBreak(runes, pos, end); brk > pos {\n\t\t\tend = brk\n\t\t}",
+     "}"),
 ]
 
 
@@ -111,6 +149,7 @@ def main():
 
     print(f"\n=== 变异测试（{len(items)} 条）===")
     caught = 0
+    broken = 0
     for name, rel, old, new in items:
         path = os.path.join(ROOT, rel)
         backup = path + ".mutation-backup"
@@ -123,12 +162,20 @@ def main():
                 continue
             open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
             code, out = run_tests(os.path.dirname(rel))
-            if code != 0:
+
+            # 编译失败不算「测试抓到」——那是变异本身写坏了，
+            # 不能证明测试有效。必须区分开，否则会虚报通过率。
+            build_failed = "[build failed]" in out or "cannot use" in out or "is not used" in out
+
+            if code != 0 and not build_failed:
                 caught += 1
                 print(f"  [CAUGHT  ] {name}")
                 f = first_failure(out)
                 if f:
                     print(f"             -> {f}")
+            elif build_failed:
+                broken += 1
+                print(f"  [BROKEN  ] {name}   <-- 变异导致编译失败，无法判定，请改写这条变异")
             else:
                 print(f"  [MISSED  ] {name}   <-- 测试没抓到，可能是假测试")
         finally:
@@ -136,8 +183,10 @@ def main():
             os.remove(backup)
 
     total = len(items)
-    print(f"\n结果：{caught}/{total} 个变异被抓到")
-    return 0 if caught == total else 1
+    print(f"\n结果：{caught}/{total} 个变异被抓到"
+          + (f"，{broken} 条变异写坏了（编译失败）" if broken else ""))
+    # 只有「全部被抓到、且没有写坏的变异」才算通过。
+    return 0 if caught == total and broken == 0 else 1
 
 
 if __name__ == "__main__":
