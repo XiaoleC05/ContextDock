@@ -212,8 +212,9 @@ func TestNoEmptyTokens(t *testing.T) {
 // 那条注释就成了一句空话。
 //
 // 两边各自多出来的部分（实测）：
-//   Han 有而 Ideographic 没有：康熙部首、CJK 部首补充、叠字号
-//   Ideographic 有而 Han 没有：〆、西夏文、女书、契丹小字
+//
+//	Han 有而 Ideographic 没有：康熙部首、CJK 部首补充、叠字号
+//	Ideographic 有而 Han 没有：〆、西夏文、女书、契丹小字
 func TestIsCJKUsesHanNotIdeographic(t *testing.T) {
 	hanOnly := []struct {
 		r    rune

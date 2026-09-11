@@ -51,10 +51,12 @@ func TestChunkJSONKeySetIsExact(t *testing.T) {
 
 	// Metadata 为 nil 时被 omitempty 省略，所以这里只应该有 4 个键。
 	want := map[string]bool{
-		"id":          true,
-		"document_id": true,
-		"ordinal":     true,
-		"content":     true,
+		"id":           true,
+		"document_id":  true,
+		"ordinal":      true,
+		"start_offset": true,
+		"end_offset":   true,
+		"content":      true,
 	}
 
 	for k := range got {

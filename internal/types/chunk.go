@@ -56,7 +56,26 @@ type Chunk struct {
 	// 前后各一段也取出来返回（这叫"上下文扩展"），提高答案的完整性。
 	Ordinal int `json:"ordinal"`
 
-	// Content 是片段正文。
+	// StartOffset 和 EndOffset 是这段在**原文中的位置**，左闭右开。
+	//
+	// ⚠️ 单位是 **rune（字符）而不是 byte**。
+	// Go 的 string 索引是字节，一个汉字占 3 字节——用字节偏移配合 s[a:b]
+	// 会切出乱码，甚至切碎多字节字符。要还原原文必须用：
+	//
+	//	runes := []rune(doc.Content)
+	//	text := string(runes[c.StartOffset:c.EndOffset])
+	//
+	// 为什么要保留偏移：
+	//   1. 校验切分没有丢内容（相邻片段应当首尾相接）
+	//   2. 上下文扩展时判断两段是否重叠
+	//   3. 将来改切分参数后，能把新旧片段对齐
+	//
+	// 注意：片段之间有 overlap，所以相邻片段的偏移区间是**重叠**的，
+	// 不是相接的。覆盖性校验应该用「区间并集 == [0, 原文长度)」。
+	StartOffset int `json:"start_offset"`
+	EndOffset   int `json:"end_offset"`
+
+	// Content 是片段正文。它应当等于 []rune(原文)[StartOffset:EndOffset]。
 	Content string `json:"content"`
 
 	// Embedding 是 Content 的向量表示，维度固定为 EmbeddingDim（1024）。
@@ -172,6 +191,9 @@ func (c Chunk) Validate() error {
 	}
 	if c.Ordinal < 0 {
 		return ErrChunkBadOrdinal
+	}
+	if c.StartOffset < 0 || c.EndOffset < c.StartOffset {
+		return fmt.Errorf("types: 偏移非法 [%d, %d)", c.StartOffset, c.EndOffset)
 	}
 	if strings.TrimSpace(c.Content) == "" {
 		return ErrChunkEmptyContent
