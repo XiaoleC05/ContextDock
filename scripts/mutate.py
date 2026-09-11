@@ -189,6 +189,38 @@ MUTATIONS = [
      "internal/retrieve/vector.go",
      "if v.norms[i] == 0 {\n\t\t\tcontinue\n\t\t}",
      "if false {\n\t\t\tcontinue\n\t\t}"),
+
+    # ---- retrieve / RRF ----
+    ("rrf: 去重用 Chunk.ID 而非 StableKey（落库前全是 0）",
+     "internal/retrieve/rrf.go",
+     "key := r.Chunk.StableKey()",
+     "key := string(rune(r.Chunk.ID))"),
+
+    ("rrf: 直接把 0 号名次代入公式（未召回拿最高分）",
+     "internal/retrieve/rrf.go",
+     "s.Score = s.RRFScore(k)",
+     "s.Score = 1/float64(k+s.LexicalRank) + 1/float64(k+s.VectorRank)"),
+
+    # ---- retrieve / hybrid ----
+    ("hybrid: 单路失败就整体失败（取消降级）",
+     "internal/retrieve/hybrid.go",
+     "if p.err != nil {\n\t\t\t\terrs = append(errs, p.err)\n\t\t\t\th.reportError(p.run.Retriever, p.err)\n\t\t\t\tcontinue\n\t\t\t}",
+     "if p.err != nil {\n\t\t\t\treturn nil, p.err\n\t\t\t}"),
+
+    ("hybrid: 每路只取 topK 不做候选放大",
+     "internal/retrieve/hybrid.go",
+     "n := topK * h.mult",
+     "n := topK"),
+
+    ("hybrid: 不施加超时",
+     "internal/retrieve/hybrid.go",
+     "ctx, cancel := context.WithTimeout(ctx, h.timeout)",
+     "ctx, cancel := context.WithCancel(ctx)"),
+
+    ("hybrid: 两路都失败时也不报错",
+     "internal/retrieve/hybrid.go",
+     "if len(runs) == 0 {\n\t\treturn nil, fmt.Errorf(\"%w: %v\", ErrBothRetrieversFailed, errors.Join(errs...))\n\t}",
+     "if false {\n\t\treturn nil, fmt.Errorf(\"%w: %v\", ErrBothRetrieversFailed, errors.Join(errs...))\n\t}"),
 ]
 
 

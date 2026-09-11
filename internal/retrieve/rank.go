@@ -14,9 +14,13 @@ import (
 )
 
 // scored 是排序的中间结果。
+//
+// result 是可选的：单路检索只需要 chunk + score，融合阶段则需要携带
+// 已经填好各路名次的完整结果。
 type scored struct {
-	chunk types.Chunk
-	score float64
+	chunk  types.Chunk
+	score  float64
+	result *types.SearchResult
 }
 
 // sortAndTrim 按分数降序排序并截取前 topK 条。
