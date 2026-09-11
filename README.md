@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/XiaoleC05/ContextDock/actions/workflows/ci.yml/badge.svg)](https://github.com/XiaoleC05/ContextDock/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/XiaoleC05/ContextDock?label=release)](https://github.com/XiaoleC05/ContextDock/releases/latest)
-[![v1.0.0](https://img.shields.io/github/milestones/progress/XiaoleC05/ContextDock/9?label=v1.0.0)](https://github.com/XiaoleC05/ContextDock/milestone/9)
+[![v1.1.0](https://img.shields.io/github/milestones/progress/XiaoleC05/ContextDock/10?label=v1.1.0)](https://github.com/XiaoleC05/ContextDock/milestone/10)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
