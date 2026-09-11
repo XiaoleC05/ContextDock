@@ -26,6 +26,12 @@ var (
 	// 单独定义这个错误是有意的：空文档被切成 0 个片段后如果静默入库，
 	// 检索时它永远召不回，而且不报错——属于最难排查的一类问题。
 	ErrNoChunks = errors.New("store: 文档没有产出任何片段")
+
+	// ErrVectorDim 表示向量的维度与 types.EmbeddingDim 不符。
+	//
+	// 维度不对如果放过去，会一路走到数据库插入时才报错，
+	// 而那时的错误信息指向 SQL 语句、不指向源头。
+	ErrVectorDim = errors.New("store: 向量维度与 EmbeddingDim 不符")
 )
 
 // Store 是持久化抽象。

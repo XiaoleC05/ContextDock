@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -48,22 +49,31 @@ func (m *Memory) SaveDocument(ctx context.Context, doc *types.Document, chunks [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// 先分配文档 ID —— 片段的 DocumentID 是**必填**字段，
+	// 校验时必须已经填好（它由存储层分配，调用方给不出来）。
 	m.nextDocID++
 	doc.ID = m.nextDocID
-	saved := m.docs[doc.ID]
-	saved = *doc
-	m.docs[doc.ID] = saved
 
+	// ⚠️ 全部校验通过之后才真正落盘。
+	//
+	// 边校验边写的话，第 N 个片段非法时前面那些和文档本身已经写进去了，
+	// 留下"有文档但片段不全"的脏数据——而且不报错，只是检索时少几段。
+	// Postgres 版有事务兜底，内存版没有，只能靠这个先后顺序保证原子性。
 	out := make([]types.Chunk, len(chunks))
 	for i, c := range chunks {
-		m.nextChunkID++
-		c.ID = m.nextChunkID
 		c.DocumentID = doc.ID
 		if err := c.Validate(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("store: 第 %d 个片段校验失败: %w", i, err)
 		}
 		out[i] = c
 	}
+
+	// 到这里才动共享状态。
+	for i := range out {
+		m.nextChunkID++
+		out[i].ID = m.nextChunkID
+	}
+	m.docs[doc.ID] = *doc
 	m.chunks[doc.ID] = out
 	return out, nil
 }
