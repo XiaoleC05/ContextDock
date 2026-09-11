@@ -98,6 +98,23 @@ SILICONFLOW_API_KEY=sk-xxxxxxxx
 
 > `.env` 已在 `.gitignore` 中。**不要在代码里硬编码 key。**
 
+### 已有数据库需要跑一次回填
+
+全新的库由 `migrations/001_init.sql` 一次建好，可以跳过这一节。
+
+但如果你在**修复之前**导入过文档，那些片段的元数据里没有 `source`，
+检索结果的溯源字段会是空的。跑一次回填补齐：
+
+```bash
+docker exec -i contextdock-pg psql -U postgres -d contextdock \
+    < migrations/002_backfill_chunk_source.sql
+```
+
+幂等，重复执行不产生任何变化。
+
+> ⚠️ 它**不会**被自动执行：`/docker-entrypoint-initdb.d/` 里的脚本只在
+> 数据目录为空时跑一次，数据卷已存在时新增的脚本不生效。
+
 ---
 
 ## 用法
@@ -106,8 +123,12 @@ SILICONFLOW_API_KEY=sk-xxxxxxxx
 
 | 工具 | 输入 | 输出 |
 | --- | --- | --- |
-| `import_document` | 文本内容 或 `.txt` / `.md` 文件路径、标题、元数据 | 导入的片段数、文档 ID |
-| `search_knowledge_base` | 查询字符串、`top_k` | 最相关的文档片段（**不含向量**） |
+| `import_document` | `content` 或 `file_path`（.txt / .md）、`title`、`source` | 文档 ID、切分出的片段数、成功嵌入的片段数 |
+| `search_knowledge_base` | `query`、`top_k` | 片段正文 + `heading` 面包屑 + `source` 来源 + `matched_by` 命中通道 + `score`（**不含向量**） |
+
+> `source` 是每个片段的**溯源标签**：传 `file_path` 时默认是文件路径，
+> 直接传文本时是 `"inline"`，也可以显式指定。它让 Agent 能回答
+> "这段话出自哪份文档"，而不是只拿到一堆无出处的文本。
 
 ### 在 Agent 中配置
 
@@ -173,7 +194,10 @@ Claude Desktop（Windows），编辑 `%APPDATA%\Claude\claude_desktop_config.jso
 
 ```text
 ContextDock/
-├── cmd/contextdock/       # 程序入口：依赖注入的组装点
+├── cmd/
+│   ├── contextdock/       # 程序入口：依赖注入的组装点
+│   ├── smoke/             # 端到端冒烟测试（把二进制当 MCP server 跑）
+│   └── mutate/            # 变异测试工具（验证测试本身有效）
 ├── internal/
 │   ├── types/             # 核心数据结构（零值语义、校验）
 │   ├── config/            # 配置加载与启动期校验
@@ -186,9 +210,8 @@ ContextDock/
 │   ├── service/           # 应用门面：索引重建、降级策略
 │   └── mcp/               # MCP 工具注册（薄适配器）
 ├── docs/                  # 设计、避坑、性能文档
-├── migrations/            # 建表 SQL
-├── deploy/                # docker-compose
-└── scripts/               # 变异测试、端到端冒烟测试
+├── migrations/            # 建表 SQL + 数据回填
+└── deploy/                # docker-compose
 ```
 
 ---
@@ -242,24 +265,28 @@ go test -v -tags=integration ./internal/store/
 ### 端到端冒烟测试
 
 ```bash
-python scripts/smoke.py bin/contextdock.exe
+go run ./cmd/smoke bin/contextdock.exe
 ```
 
 把二进制当 MCP server 跑起来，用 stdio 发 JSON-RPC——
-验证握手、工具发现、导入、检索，以及**嵌入失败时的降级链路**。
+验证握手、工具发现、导入、检索、**嵌入失败时的降级链路**，
+以及溯源字段过完序列化之后还在不在。
 单元测试覆盖不到的接缝（比如 stdout 被日志污染）只有这里能发现。
 
 ### 测试有效性用变异测试验证
 
-**覆盖率高不代表测试有效。** 本项目用 `scripts/mutate.py` 故意在源码里植入 bug，
+**覆盖率高不代表测试有效。** 本项目用 `cmd/mutate` 故意在源码里植入 bug，
 确认测试会失败：
 
 ```bash
-python scripts/mutate.py          # 全部
-python scripts/mutate.py bm25     # 只跑名字含 bm25 的
+go run ./cmd/mutate          # 全部
+go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
 ```
 
-当前 **36/36 个变异全部被捕获**。它能发现的问题很具体，例如：
+> 两个工具都是 Go 写的，`go run` 就能跑——**跑测试的链路不需要额外装 Python**。
+> 装好 Go 就能跑全套，对贡献者是实打实的减负。
+
+当前 **38/38 个变异全部被捕获**。它能发现的问题很具体，例如：
 
 | 植入的 bug | 抓住它的测试 |
 | --- | --- |
@@ -270,8 +297,14 @@ python scripts/mutate.py bm25     # 只跑名字含 bm25 的
 | BM25 建索引时直接读 `Content` 而非 `IndexText` | `TestBM25IndexesHeadingBreadcrumb` |
 | 单路检索失败就让整个查询失败 | `TestHybridDegradesWhenOnePathFails` |
 | `truncateRunes` 改成按字节截断 | `TestTruncateRunesHandlesMultiByte` |
+| 检索结果不填文档来源（**真实缺陷**） | `TestSearchReturnsSource` |
+| 导入时不下沉文档来源 | `TestIngestSinksDocumentSourceIntoChunks` |
 
-> 这条实践来自一个真实教训：最初的断言用 `strings.Contains(raw, "embedding")`（小写），
+> 最后两条来自一个**上线前发现并修掉的真实缺陷**：`ResultItem.Source`
+> 声明了、schema 里也写了描述（Agent 看得见），但构造它的函数从不赋值，
+> 于是它永远是空的。**声明 ≠ 赋值**，而它当时**一条测试都没有**。
+>
+> 同一类教训还有一次：最初的断言用 `strings.Contains(raw, "embedding")`（小写），
 > 而 Go 序列化出的是 `"Embedding"`（**大写 E**）——大小写不匹配导致断言**永不触发**，
 > 删掉 `json:"-"` 测试照样绿。详见 [docs/PITFALLS.md](docs/PITFALLS.md)。
 
@@ -279,6 +312,12 @@ python scripts/mutate.py bm25     # 只跑名字含 bm25 的
 
 ## 已知限制
 
+- **没有相关性阈值**：只要索引非空，检索**总会返回 top-K 条**，不会因为"知识库里没有相关内容"
+  而返回空。实测问一个库中完全没有的问题（"如何用 Kubernetes 部署一个 Java 微服务"），
+  返回片段的 RRF 分约 `0.031`，而真正命中时约 `0.033`——**分数本身无法用来判断相关性**。
+  边界问题只能靠 Agent 自己读内容判断。好消息是工具**只返回原始片段、不生成答案**，
+  所以不存在"硬编答案"；但它也不阻止 Agent 过度解读无关片段。
+  （`hint` 字段只在知识库**完全为空**时给出，那时它会提示先导入文档。）
 - 只处理 **中英混合**的文本；其他语种（泰/老/高棉等无空格语言）需要词典分词，未实现
 - 只支持 `.txt` / `.md` 和直接传入的文本，**不含 PDF / Word 解析**
 - **内存检索是暴力扫描**：`internal/retrieve` 的向量检索会对全部向量算一遍余弦相似度。
@@ -286,6 +325,10 @@ python scripts/mutate.py bm25     # 只跑名字含 bm25 的
   目前检索路径还没用它）
 - **BM25 是内存索引**，每次启动从数据库全量重建，大文档库下启动会变慢
 - 切分参数（400 字 / 60 字重叠）是**社区经验值**，没有用真实查询集做 recall 评测校准
+- **代码块和图表会被切碎**：切分按标题和句末标点断句，但**不识别围栏代码块**。
+  一张 1500 字的架构 ASCII 图会被 400 字上限切成 5 片，这些片段语义为空、
+  向量是噪声。实测把本项目的 README 喂进去，32 片里有 5 片是这种（约 16%）。
+  另外重叠是**盲退 60 个字符**、不吸附行边界，所以硬截断出来的片段常从半行开始
 - 第一版**无并发写入保护**，不适合多进程同时导入
 - 未做多租户隔离，单机单用户场景
 
@@ -295,7 +338,7 @@ python scripts/mutate.py bm25     # 只跑名字含 bm25 的
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/DESIGN.md](docs/DESIGN.md) | 11 条关键设计决策，含被否决的替代方案 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 12 条关键设计决策，含被否决的替代方案 |
 | [docs/PITFALLS.md](docs/PITFALLS.md) | 踩过的坑：环境 / Go 语言 / 外部 API / 数据库 |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | 性能基准与优化记录（含 pprof 分析） |
 | [Issues](https://github.com/XiaoleC05/ContextDock/issues) | 开发任务，一个 issue 一个可交付物 |

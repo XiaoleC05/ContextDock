@@ -193,3 +193,68 @@ curl -d @req.json https://api.siliconflow.cn/v1/embeddings
   大小写不匹配导致**断言永远不触发**，删掉 `json:"-"` 测试照样绿。
   **"有测试"和"测试有效"是两件事**——用变异测试验证
 - ⚠️ **提交信息用 `closes #N`**，GitHub 会自动关闭 issue 并更新里程碑进度
+
+### ✅ 声明 ≠ 赋值：DTO 上的字段可以是个空壳
+
+**本项目真实缺陷。** `ResultItem.Source` 长这样：
+
+```go
+Source string `json:"source,omitempty" jsonschema:"所属文档的来源"`
+```
+
+声明了，`jsonschema` 描述也写了——Agent 在 `tools/list` 里看得见它，
+工具的 schema 里明明白白写着一行"所属文档的来源"。
+
+但 `toResultItem()` 是**唯一**的构造点，它**从不给这个字段赋值**。
+根因更隐蔽：`Source` 挂在 `Document` 上，而 `SearchResult` 内嵌的是 `Chunk`
+——**检索路径里根本拿不到它**。所以这个字段从写下的第一天起就永远为空。
+
+**为什么测试全绿也没发现**：`server_test.go` 全文**零次**提到 `Source`。
+DTO 有字段、schema 有条目，看起来"实现了"，实际上是个空壳。
+**覆盖率再高也覆盖不到一个没人断言过的字段。**
+
+**同类信号**：一个字段如果"声明了但没有任何测试碰过"，大概率不是它太简单，
+而是它**根本没接上**。
+
+> 顺带一提：这类字段危害比"少个功能"更大——Agent 会**按 schema 做计划**。
+> 它在 schema 里看到有 `source`，可能会说"我先按来源过滤一下"，
+> 然后拿到一堆空值，还不知道是自己用错了还是服务坏了。
+
+### ⚠️ 变异测试是**按包**跑的，跨包的测试抓不到
+
+跑 `go run ./cmd/mutate` 时，某个变异报 `[MISSED]`，
+第一反应是"测试是假的"。但本项目这次的真实原因是**测试放错了包**：
+
+脚本跑的是 `go test ./<被变异的文件所在包>/...`。
+一条变异改的是 `internal/ingest/ingest.go`，而唯一覆盖它的测试写在
+`internal/mcp/` 里——**根本没被执行**。
+
+**判断方法**：看到 `MISSED` 先别急着补断言，确认那个包自己有没有测试。
+没有的话，补在**被变异文件所在的包**里，而不是它的调用方。
+（本次补完之后 38/38 全中。）
+
+### ✅ 反范式字段只对**新写入**的数据生效
+
+给片段加了 `metadata["source"]` 之后，新导入的文档立刻带上了，
+但**修复之前入库的片段仍然是空的**——因为那是一次**数据**变更，
+不是一次**代码**变更。代码改完只影响未来的写入。
+
+**所以凡是"往已有结构里补一个新字段"，都要同时问一句：存量数据怎么办？**
+
+本项目补了 `migrations/002_backfill_chunk_source.sql`：
+
+```sql
+UPDATE chunk AS c
+SET metadata = coalesce(c.metadata, '{}'::jsonb)
+               || jsonb_build_object('source', d.source)
+FROM document AS d
+WHERE c.document_id = d.id
+  AND d.source <> ''
+  AND (c.metadata ->> 'source') IS DISTINCT FROM d.source;   -- ← 幂等靠这句
+```
+
+⚠️ **init 脚本不会自动跑它**：`/docker-entrypoint-initdb.d/` 里的东西
+只在数据目录为空时执行一次，数据卷已存在时新增脚本不生效（同 `001` 那条）。
+
+> 端到端测试正是在这里立功的：单元测试全绿，一跑真实链路就发现
+> 5 条结果里只有 1 条带 `source`——**假绿**。
