@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "group": "en",
+  "title": "英文提问",
+  "queries": [
+    {
+      "id": "en-001",
+      "query": "Why is the embedding dimension capped at 1024?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "4096 > 4000，**连 `halfvec` 都建不了索引**（差 96 维）"
+        }
+      ],
+      "note": "纯英文问、命中中文答案。验证跨语言语义召回是否真的成立。"
+    },
+    {
+      "id": "en-002",
+      "query": "What happens when the embedding API is unavailable?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**逐级降级**：嵌入接口挂了不会让检索整个失败"
+        }
+      ],
+      "note": "纯英文问、命中中文答案。"
+    },
+    {
+      "id": "en-003",
+      "query": "How does RRF decide the final order of results?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "RRF **只用名次，不用分数**，天然绕开整件事。"
+        }
+      ],
+      "note": "纯英文问、命中中文答案。术语 RRF 两文共用，属于正常的技术词重合，不是抄答案。"
+    },
+    {
+      "id": "en-004",
+      "query": "How do I run the benchmark suite?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "go test -bench . -benchmem ./..."
+        }
+      ],
+      "note": "纯英文问，命中英文命令行。验证代码块里的命令能被召回。"
+    },
+    {
+      "id": "en-005",
+      "query": "What is the dimension limit for an HNSW index?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "ERROR: column cannot have more than 2000 dimensions for hnsw index"
+        }
+      ],
+      "note": "纯英文问，命中英文报错原文。"
+    },
+    {
+      "id": "en-006",
+      "query": "How do I assert that a function panics in a Rust test?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "rust-book-zh-testing.md",
+          "quote": "这个属性在函数中的代码 panic 时会通过，而在其中的代码没有 panic 时失败。"
+        }
+      ],
+      "note": "纯英文问、命中中文答案，且目标在外部语料里。"
+    },
+    {
+      "id": "en-007",
+      "query": "为什么 RRF 的 k 取 60？",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "`k=60` 来自 Cormack、Clarke、Büttcher 的 SIGIR 2009 论文"
+        }
+      ],
+      "note": "中英混写：问句主体是中文，只有专有名词是英文。"
+    },
+    {
+      "id": "en-008",
+      "query": "assert_ne! 和 assert_eq! 分别用在哪里",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "rust-book-zh-testing.md",
+          "quote": "`assert_ne!` 宏在传递给它的两个值不相等时通过，而在相等时失败。"
+        },
+        {
+          "source": "rust-book-zh-testing.md",
+          "quote": "`assert_eq!` 和 `assert_ne!` 宏在底层分别使用了 `==` 和 `!=`。"
+        }
+      ],
+      "note": "中英混写。**这条被独立复核改正过**：原标注是章节标题行「### 使用 `assert_eq!` 和 `assert_ne!` 宏来测试相等」，复核标注员选的是真正讲用法的正文。标题只提到两个宏的名字，没回答「分别用在哪里」——正文才是。原始标注偏弱，已按复核结果替换。"
+    },
+    {
+      "id": "en-009",
+      "query": "How should I tune hnsw.ef_search?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "pitfalls.md",
+          "quote": "`hnsw.ef_search` 默认 40 偏低"
+        }
+      ],
+      "note": "纯英文问、命中中文答案，且答案里带精确参数名。"
+    },
+    {
+      "id": "en-010",
+      "query": "Which segmentation strategy is used for Chinese text?",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "**决策**：按书写系统分流——Han / 平假名 / 片假名走 bigram，拉丁字母按词切。"
+        }
+      ],
+      "note": "纯英文问、命中中文答案。"
+    }
+  ]
+}

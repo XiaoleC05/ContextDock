@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "group": "zh",
+  "title": "中文提问",
+  "queries": [
+    {
+      "id": "zh-001",
+      "query": "为什么向量维度不能定得更大",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "4096 > 4000，**连 `halfvec` 都建不了索引**（差 96 维）"
+        }
+      ],
+      "note": "DESIGN §1 的核心论证。直接提问：文档里就是用「维度」这个词讲的。"
+    },
+    {
+      "id": "zh-002",
+      "query": "给 bge-m3 传 dimensions 参数会怎样",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "对 bge-m3 传会返回 **400 错误**，不是静默忽略"
+        }
+      ],
+      "note": "DESIGN §2。参数名直接出自原文。"
+    },
+    {
+      "id": "zh-003",
+      "query": "中文切词为什么不用现成的第三方库",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "| `gojieba` | 依赖 **cgo + C++**"
+        }
+      ],
+      "note": "间接提问：原文讲的是「为什么不引入分词库」，问的是同一个决策，但没有直接复述『分词库』这个说法以外的原文措辞。"
+    },
+    {
+      "id": "zh-004",
+      "query": "两路检索的结果为什么要按名次合并而不是按分数加权",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "BM25 分和余弦相似度**不在同一个数量级**"
+        }
+      ],
+      "note": "DESIGN §6。"
+    },
+    {
+      "id": "zh-005",
+      "query": "怎么判断搜出来的结果是不是真的相关",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "这是一个多刻度字段，绝对不要跨阶段比较或做阈值过滤。"
+        }
+      ],
+      "note": "间接提问：原文写的是「不要拿分数做阈值过滤」，问的是背后的目的。"
+    },
+    {
+      "id": "zh-006",
+      "query": "为什么返回给 Agent 的结果里看不到向量数据",
+      "kind": "multi-hop",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "`search_knowledge_base` 的输出**不含向量**",
+          "grade": 1
+        },
+        {
+          "source": "design.md",
+          "quote": "10 条结果 × 1024 维 = 10240 个浮点数 ≈ 100KB 纯数字",
+          "grade": 1
+        }
+      ],
+      "note": "多跳：结论（不外传）在 README，量化理由（100KB 纯数字）在 DESIGN §4。两段各只答了一半，标部分相关。"
+    },
+    {
+      "id": "zh-007",
+      "query": "知识库里没有相关内容时检索会返回空吗",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "只要索引非空，检索**总会返回 top-K 条**"
+        }
+      ],
+      "note": "README 已知限制第 1 条。"
+    },
+    {
+      "id": "zh-008",
+      "query": "文档里的图为什么会被截断成几块",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**不识别围栏代码块**"
+        }
+      ],
+      "note": "间接提问：原文说的是「不识别围栏代码块」，问的是它在文档里的可见后果（图被截断）。"
+    },
+    {
+      "id": "zh-009",
+      "query": "怎么确认测试是真的有效而不是白写的",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**覆盖率高不代表测试有效。**"
+        }
+      ],
+      "note": "README 测试一节。"
+    },
+    {
+      "id": "zh-010",
+      "query": "检索结果里的来源信息是哪里来的",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "`source` 是每个片段的**溯源标签**"
+        }
+      ],
+      "note": "间接提问：原文叫「溯源标签」，问的是「来源信息」。"
+    },
+    {
+      "id": "zh-011",
+      "query": "重启之后关键词索引怎么办",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**BM25 是内存索引**，每次启动从数据库全量重建"
+        }
+      ],
+      "note": "README 已知限制。"
+    },
+    {
+      "id": "zh-012",
+      "query": "为什么索引文本必须由同一个函数产出",
+      "kind": "multi-hop",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "如果 Embedder 和 BM25 各自拼一次",
+          "grade": 1
+        },
+        {
+          "source": "design.md",
+          "quote": "都不允许直接读 `c.Content`。",
+          "grade": 1
+        }
+      ],
+      "note": "多跳：DESIGN §8 的两处——先讲各自拼接的后果，再给硬约束。两处相隔较远，各自只答一半，标部分相关。"
+    },
+    {
+      "id": "zh-013",
+      "query": "给已有结构补一个新字段之后老数据怎么处理",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "pitfalls.md",
+          "quote": "存量数据怎么办"
+        }
+      ],
+      "note": "间接提问：原文问的是「存量数据怎么办」，本条用了「老数据」这个说法。"
+    },
+    {
+      "id": "zh-014",
+      "query": "Rust 里怎么验证一个函数会按预期崩溃",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "rust-book-zh-testing.md",
+          "quote": "可以通过对函数增加另一个属性 `should_panic` 来实现这些。"
+        }
+      ],
+      "note": "外部语料。README/DESIGN/PITFALLS 之外，验证候选池拉大之后仍能召回。"
+    },
+    {
+      "id": "zh-015",
+      "query": "Rust 里 unwrap 碰到错误会怎么样",
+      "kind": "direct",
+      "expect": [
+        {
+          "source": "rust-book-zh-errors.md",
+          "quote": "如果 `Result` 是成员 `Err`，`unwrap` 会为我们调用 `panic!`"
+        }
+      ],
+      "note": "外部语料，同源的另一章。验证两章之间不会被互相混淆。"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "source": "readme.md",
+      "path": "eval/corpus/readme.md",
+      "sha256": "d93774a7e0fd527f99f1570fb9f7e927e14ba8646b30d6228cf13aaa82524774",
+      "origin": "本仓库 README.md 的快照，取自 v1.0.0 发布后的 main",
+      "why": "结构最杂：ASCII 架构图、Markdown 表格、围栏代码块、中英混排，且是全部语料里唯一带大段图形字符的文件。切分缺陷（#47 代码块被切碎）只有它能暴露。",
+      "chunks_at_default": 43
+    },
+    {
+      "source": "design.md",
+      "path": "eval/corpus/design.md",
+      "sha256": "56de45afbe65f7ebab45b49873d960958099deb623e94c4fbb9249420e530851",
+      "origin": "本仓库 docs/DESIGN.md 的快照，取自 v1.0.0 发布后的 main",
+      "why": "纯中文决策论证，段落长、术语密度高、同一个概念在多个决策里反复出现。用来测「换概念问同一件事」能不能被向量通道接住。",
+      "chunks_at_default": 22
+    },
+    {
+      "source": "pitfalls.md",
+      "path": "eval/corpus/pitfalls.md",
+      "sha256": "9c7371776362c10519156326b406ddbb118dc7f67cdd5c6f8bf28fa74d78eaaa",
+      "origin": "本仓库 docs/PITFALLS.md 的快照，取自 v1.0.0 发布后的 main",
+      "why": "大量短条目 + 表格 + 错误码与命令行片段。是精确 token 子集（错误码、环境变量名、SQL 片段）的主要取材地。",
+      "chunks_at_default": 33
+    },
+    {
+      "source": "rust-book-zh-testing.md",
+      "path": "eval/corpus/rust-book-zh-testing.md",
+      "sha256": "bd390be4e661e1f04fd790ef619712de2fc1105b121226c1b789b00ff1ea31b3",
+      "origin": "《Rust 程序设计语言》中文版 11.1「如何编写测试」，来自 github.com/rust-lang-cn/book-cn，固定于 commit cde74c448e301ce8ac7960a0d3dc879efd83635d，许可 Apache-2.0",
+      "why": "外部语料，规模比本仓库文档大一个量级，用来把候选池拉开——候选太少时 recall@10 几乎必中，参数扫描的区分度会被压缩到看不出来。中文散文 + 英文代码块，正好匹配中英混合分词场景。",
+      "chunks_at_default": 60
+    },
+    {
+      "source": "rust-book-zh-errors.md",
+      "path": "eval/corpus/rust-book-zh-errors.md",
+      "sha256": "054f6747418cece9d2102d1bdc557b997c9be633d9fc70431b1928ae8cf9dc3e",
+      "origin": "《Rust 程序设计语言》中文版 9.2「用 Result 处理可恢复的错误」，来自 github.com/rust-lang-cn/book-cn，固定于 commit cde74c448e301ce8ac7960a0d3dc879efd83635d，许可 Apache-2.0",
+      "why": "与上一份同源但主题不同：这一份围绕错误类型展开，术语高度集中在 unwrap / expect / panic / ? 运算符上。同源主题差异明显的两份，能暴露「向量通道把同文档不同章节混为一谈」的问题。",
+      "chunks_at_default": 38
+    }
+  ]
+}

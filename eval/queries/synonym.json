@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "group": "synonym",
+  "title": "同义改写",
+  "queries": [
+    {
+      "id": "sy-001",
+      "query": "不借助现成组件，自己实现一套组合方式的好处在哪",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "| `gojieba` | 依赖 **cgo + C++**"
+        }
+      ],
+      "note": "全组的存在意义是「一个字都对不上，只能靠语义召回」。校验会强制检查零字面重叠。改写过一次——早先的「为什么」「最后」与目标片段撞词，被校验拦下。"
+    },
+    {
+      "id": "sy-002",
+      "query": "逐个比对的开销还划算吗",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**内存检索是暴力扫描**"
+        }
+      ],
+      "note": "原文说的是「暴力扫描」「十万级以上应当走 HNSW」；本条不问规模，只问这套做法划不划算。改写过一次——早先的措辞里「数据」「查询」「会变」「变慢」都与目标片段撞词，被校验拦下。"
+    },
+    {
+      "id": "sy-003",
+      "query": "排版元素为什么会散架",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**不识别围栏代码块**"
+        }
+      ],
+      "note": "原文讲的是切分器不认围栏块，问的是它造成的可视后果。"
+    },
+    {
+      "id": "sy-004",
+      "query": "数据库能存多长的浮点数组",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "| `vector` | 16000 维 | **2000 维** |"
+        }
+      ],
+      "note": "原文用「维」，本条用「浮点数组」。"
+    },
+    {
+      "id": "sy-005",
+      "query": "两套打分体系该怎么合在一起",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "BM25 分和余弦相似度**不在同一个数量级**"
+        }
+      ],
+      "note": "原文用「加权求和」「归一化」这套说法，本条用「合在一起」。"
+    },
+    {
+      "id": "sy-006",
+      "query": "服务出故障的时候还能查到东西吗",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "**逐级降级**：嵌入接口挂了不会让检索整个失败"
+        }
+      ],
+      "note": "原文用「降级」「挂了」。改写过一次——早先的「外部」「系统」与目标片段撞词（那一段里正好有「零外部依赖」和「书写系统」），被校验拦下。"
+    },
+    {
+      "id": "sy-007",
+      "query": "并发上限调低到多少合适",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "pitfalls.md",
+          "quote": "连接池默认 `MaxConns = max(4, NumCPU)`"
+        }
+      ],
+      "note": "原文讲连接池默认开到几十条，本条问的是该降到多少。改写过一次——早先用的「收窄」在目标片段里就有，被校验拦下。"
+    },
+    {
+      "id": "sy-008",
+      "query": "遇到故障就让进程直接退出，这种写法叫什么",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "rust-book-zh-errors.md",
+          "quote": "如果 `Result` 是成员 `Err`，`unwrap` 会为我们调用 `panic!`"
+        }
+      ],
+      "note": "原文用 unwrap / panic!，本条用中文描述它的行为。"
+    },
+    {
+      "id": "sy-009",
+      "query": "怎么才能知道该不该把结果给出去",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "readme.md",
+          "quote": "只要索引非空，检索**总会返回 top-K 条**"
+        }
+      ],
+      "note": "原文讲的是「没有相关性阈值」，本条从使用者的困惑角度问同一件事。"
+    },
+    {
+      "id": "sy-010",
+      "query": "这两种情况为什么不能用同一种表示",
+      "kind": "indirect",
+      "expect": [
+        {
+          "source": "design.md",
+          "quote": "空值和缺失必须能区分"
+        }
+      ],
+      "note": "原文讲「空值和缺失必须能区分」，本条问的是为什么不能合并表示。"
+    }
+  ]
+}
