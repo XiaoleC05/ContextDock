@@ -188,6 +188,25 @@ type ResultItem struct {
 	Source  string  `json:"source,omitempty" jsonschema:"所属文档的来源"`
 	Ordinal int     `json:"ordinal" jsonschema:"片段在原文中的序号"`
 	Heading string  `json:"heading,omitempty" jsonschema:"片段所属的标题层级（面包屑）"`
+	// LexicalScore / VectorScore 是**各通道的原始分**。
+	//
+	// # 为什么要把原始分暴露给 Agent
+	//
+	// 因为分数判断相关性这件事，工具这边**做不到**（#52 实测）：
+	//
+	//   - RRF 分**完全不可分**：库里根本没有答案时，返回结果的最高分
+	//     与真正命中时完全相同（都是 0.0328）
+	//   - 原始余弦分部分可分，但任何可用阈值都会误杀 20%~50% 的有答案查询
+	//     （阈值 0.58 时召回 100%、精确率只有 0.38）
+	//
+	// 所以工具**不做自动过滤**，而是把原始分交出去。
+	// Agent 能看到内容的细节，而一个固定阈值只能看到一个数。
+	//
+	// ⚠️ 代价也要说清：这等于把判断责任推给了 Agent。
+	// 如果它不加判断地照单全收，结果就是"永远返回 top-K"——也就是现状。
+	LexicalScore float64 `json:"lexical_score" jsonschema:"关键词通道的原始 BM25 分（0 = 未被该通道召回）"`
+	VectorScore  float64 `json:"vector_score" jsonschema:"向量通道的原始余弦相似度（0 = 未被该通道召回）"`
+
 	// 命中的检索通道，便于解释"为什么这条排前面"
 	MatchedBy []string `json:"matched_by,omitempty" jsonschema:"该结果被哪些检索通道命中（lexical / vector）"`
 
@@ -277,8 +296,11 @@ func toResultItem(r types.SearchResult, prev, next []types.Chunk) ResultItem {
 	item := ResultItem{
 		Content: r.Chunk.Content,
 		Score:   r.Score,
-		Ordinal: r.Chunk.Ordinal,
-		Heading: r.Chunk.Metadata[types.MetadataKeyHeading],
+		// 原始分：给 Agent 判断"这条到底相不相关"用，见字段注释。
+		LexicalScore: r.LexicalScore,
+		VectorScore:  r.VectorScore,
+		Ordinal:      r.Chunk.Ordinal,
+		Heading:      r.Chunk.Metadata[types.MetadataKeyHeading],
 		// Source 来自**片段元数据**，不是 Document ——
 		// 检索路径里根本没有 Document，它由 ingest 在导入时下沉进来。
 		// 这个字段曾经声明了却从不赋值（DTO 声明 ≠ 有人填），

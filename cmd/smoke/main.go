@@ -525,6 +525,15 @@ func run() error {
 	keys := map[string]bool{}
 	collectKeys(found, keys)
 	check(!keys["embedding"] && !keys["Embedding"], "输出里不含向量字段")
+	// 原始分必须暴露出来（#53）。
+	//
+	// 工具不做相关性过滤，判断责任交给 Agent——而那要求它**拿得到原始分**。
+	// 只给 RRF 分的话，Agent 手上是一个完全无法判断相关性的数字
+	// （实测：库里没有答案时的最高 RRF 分与真正命中时完全相同）。
+	keys = map[string]bool{}
+	collectKeys(found, keys)
+	check(keys["lexical_score"] && keys["vector_score"],
+		"结果里暴露了原始分（lexical_score / vector_score）")
 
 	fmt.Println("\n=== 5. stderr 日志 ===")
 	for _, line := range srv.stderrTail(6) {

@@ -379,7 +379,14 @@ func TestResultItemHasNoEmbeddingField(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"content": true, "score": true, "ordinal": true}
+	// 白名单只收**标量**。往这里加字段时问一句「它会不会是 1024 个浮点数」——
+	// 那正是这个测试要挡的东西。
+	want := map[string]bool{
+		"content": true, "score": true, "ordinal": true,
+		// 原始分（#53）：两个标量，用来让 Agent 自己判断相关性。
+		// RRF 分完全不可分，原始分部分可分——但都不该由工具替 Agent 过滤。
+		"lexical_score": true, "vector_score": true,
+	}
 	for k := range m {
 		if !want[k] {
 			t.Errorf("ResultItem 出现了未预期的字段 %q —— "+

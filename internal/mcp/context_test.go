@@ -101,3 +101,31 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+func TestToResultItemCarriesRawScores(t *testing.T) {
+	// 原始分必须真的被**赋值**，而不只是声明。
+	//
+	// ⚠️ 这个 DTO 上出过一次真实缺陷：`Source` 字段声明了、jsonschema 里
+	// 也写了描述（Agent 在 tools/list 里看得见），但构造它的函数从不赋值，
+	// 于是它永远是空的。**声明 ≠ 赋值**，而当时那个字段一条测试都没有。
+	//
+	// 原始分（#53）正处在同一个位置上：工具靠它把「判断相关性」这件事
+	// 交给 Agent，不赋值等于这个决定没有落实。
+	r := types.SearchResult{
+		Chunk:        chunkWith("命中", 1),
+		Score:        0.0328,
+		LexicalScore: 8.9,
+		VectorScore:  0.71,
+	}
+	item := toResultItem(r, nil, nil)
+
+	if item.Score != 0.0328 {
+		t.Errorf("融合分应原样带出，实际 %v", item.Score)
+	}
+	if item.LexicalScore != 8.9 {
+		t.Errorf("lexical_score 应原样带出，实际 %v", item.LexicalScore)
+	}
+	if item.VectorScore != 0.71 {
+		t.Errorf("vector_score 应原样带出，实际 %v", item.VectorScore)
+	}
+}

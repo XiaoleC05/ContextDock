@@ -463,6 +463,15 @@ var mutations = []mutation{
 		new:  `e.Grade = GradePartial`,
 	},
 
+	{
+		// 不暴露原始分：Agent 手上只剩一个完全无法判断相关性的数字
+		// （实测无答案时的最高 RRF 分与真正命中时完全相同）。
+		name: "mcp: 结果不带原始分",
+		file: "internal/mcp/server.go",
+		old:  `		VectorScore:  r.VectorScore,`,
+		new:  `		VectorScore:  0,`,
+	},
+
 	// ---- 分数分布（#52）----
 	{
 		// 把 norel 组的结果混进「不相关」桶：阈值要挡的是"库里根本没答案"，
