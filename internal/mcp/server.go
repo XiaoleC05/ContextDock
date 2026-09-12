@@ -220,6 +220,16 @@ type ResultItem struct {
 	ContextAfter  string `json:"context_after,omitempty" jsonschema:"命中片段后一段的开头（已截断），用于理解上下文"`
 }
 
+// scoreNote 是结果非空时随附的说明。
+//
+// 它**只陈述一件事**：分数不能用来判断相关性，判断得靠读内容。
+//
+// 保持简短是有意的：它每次检索都会跟着结果发出去，
+// 而 Agent 的上下文窗口是稀缺资源（同 contextSnippetRunes 那条考虑）。
+const scoreNote = "结果按融合名次排序，但 **score 不能用来判断相关性**" +
+	"（实测：库里没有答案时的最高分与真正命中时完全相同）。" +
+	"请阅读 content 自行判断是否回答了问题；vector_score 可作参考。"
+
 // contextSnippetRunes 是上下文摘要的截断长度（rune）。
 //
 // # 为什么截断而不是整段带出
@@ -271,10 +281,32 @@ func HandleSearch(svc *service.Service) sdkmcp.ToolHandlerFor[SearchInput, Searc
 		}
 		out.Count = len(out.Results)
 
+		// hint 有两种，对应两种**完全不同**的处境。
+		//
+		// # 为什么"库非空但问题不相关"这种不能靠判断分数来解决
+		//
+		// #22 验收时发现：hint 只在索引为空时触发，库非空但问题完全不相关时
+		// 不给任何信号。当时以为补一个"不相关提示"就行，实测发现**做不到**：
+		// 试了四类候选信号，全部与真正命中的查询重叠——
+		//
+		//   最高余弦 / 顶部陡峭度 / 两路都召回的条数 / 融合 1~5 名分差
+		//
+		// 最直接的一条：库里没有答案时返回的最高 RRF 分，
+		// 与真正命中时的最高分**完全相同**（都是 0.0328）。
+		// 详见 BENCHMARKS.md 的 #52 与 #54 两节。
+		//
+		// 所以这里**不断言"这些结果不相关"**——那必然是猜的，
+		// 而假阳性（把真命中误判成不相关）比漏报更糟：
+		// Agent 会因此放弃一份本来能回答用户的结果。
+		//
+		// 改成明确说出「工具判断不了，请你来判断」。它不是相关性判断，
+		// 但它是 Agent 真正缺的那条信息——它能看到 content，而工具只有分数。
 		if out.Count == 0 {
 			// 空结果时给一句可操作的建议，而不是只回一个空数组。
 			// Agent 拿到空数组通常会说"没找到"，用户不知道下一步该干什么。
 			out.Hint = "知识库中没有匹配的内容。可以先用 import_document 导入相关文档。"
+		} else {
+			out.Hint = scoreNote
 		}
 
 		log.Printf("检索完成: 命中 %d 条%s", out.Count,

@@ -464,6 +464,14 @@ var mutations = []mutation{
 	},
 
 	{
+		// 有结果时不说明分数的局限：Agent 手上没有任何信号，
+		// 会把一堆可能完全不相关的结果当成答案照单全收。
+		name: "mcp: 有结果时不说明分数判断不了相关性",
+		file: "internal/mcp/server.go",
+		old:  `			out.Hint = scoreNote`,
+		new:  `			out.Hint = ""`,
+	},
+	{
 		// 不暴露原始分：Agent 手上只剩一个完全无法判断相关性的数字
 		// （实测无答案时的最高 RRF 分与真正命中时完全相同）。
 		name: "mcp: 结果不带原始分",
