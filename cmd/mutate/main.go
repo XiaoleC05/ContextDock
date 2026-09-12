@@ -510,6 +510,25 @@ var mutations = []mutation{
 		new:  `	s := vs`,
 	},
 
+	{
+		// 报告里写死切分参数：那一行是"这组数字是在什么参数下测的"的记录，
+		// 写死之后报告与实际结果对不上，而 CI 会拿报告当断言基准。
+		name: "eval: 语料状态报死的切分参数不是实际的",
+		file: "internal/eval/corpus_state.go",
+		old: `		MaxRunes:     opt.MaxRunes,
+		Overlap:      opt.Overlap,`,
+		new: `		MaxRunes:     400,
+		Overlap:      60,`,
+	},
+	{
+		// 重新读磁盘文件而不是用 suite 里的文本：两条路径的换行归一化
+		// 一旦不一致，报出来的片段数就和评测对不上。
+		name: "eval: 语料状态从磁盘重读而非用已归一化的文本",
+		file: "internal/eval/corpus_state.go",
+		old:  `		text, ok := suite.Content(f.Source)`,
+		new:  `		text, ok := "", false`,
+	},
+
 	// ---- 文档去重（#55）----
 	{
 		// 命中重复后不删旧的：库里变成两份，检索时两条一模一样的结果

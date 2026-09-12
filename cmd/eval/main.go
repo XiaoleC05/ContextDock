@@ -45,6 +45,7 @@ func run() error {
 		root     = flag.String("root", ".", "仓库根目录（eval/ 所在的目录）")
 		validate = flag.Bool("validate", false, "只校验评测集与语料指纹，不跑检索")
 		stamp    = flag.Bool("stamp", false, "重打语料指纹（**破坏性**，只在有意改过语料后用）")
+		corpus   = flag.Bool("corpus", false, "只报告语料在当前参数下的确定状态，不嵌入、不检索")
 
 		// 检索与切分参数。全部可覆盖，因为参数扫描（#43/#44）
 		// 靠的就是「同一份评测集 + 不同参数 → 可比的数字」。
@@ -103,11 +104,6 @@ func run() error {
 		return nil
 	}
 
-	emb, err := buildEmbedder(*root, *cache)
-	if err != nil {
-		return err
-	}
-
 	opt := eval.Options{
 		TopK: *topK, RRFK: *rrfK, Mult: *mult,
 		MaxRunes: *maxRunes, Overlap: *overlap, NDCGK: *ndcgK,
@@ -121,6 +117,21 @@ func run() error {
 	}
 	// 注意：Overlap 的 0 是合法配置（完全不重叠），不能用零值判断"没传"。
 	// 所以 flag 默认是 -1，只有 >= 0 才覆盖，之后交给 Normalize 兜底。
+
+	// -corpus 排在组装 embedder **之前**：它只切分不嵌入，
+	// 所以既不需要 API Key，也不该因为缺 Key 而失败。
+	if *corpus {
+		st, err := eval.DescribeCorpus(suite, opt)
+		if err != nil {
+			return err
+		}
+		return eval.WriteCorpusState(os.Stdout, st, *asJSON)
+	}
+
+	emb, err := buildEmbedder(*root, *cache)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

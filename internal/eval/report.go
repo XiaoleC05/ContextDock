@@ -295,3 +295,36 @@ func isWide(r rune) bool {
 	}
 	return unicode.Is(unicode.Han, r)
 }
+
+// WriteCorpusState 输出语料状态。
+//
+// asJSON 为真时输出 JSON（给 CI 断言用），否则输出人读的表格。
+//
+// 两种格式共用同一个结构体，所以**人看到的和机器读到的必然一致**——
+// 各写一套的话，两边迟早会对不上，而对不上的表现是
+// "报告里写着 196，断言里期望 196，却总是失败"。
+func WriteCorpusState(w io.Writer, st *CorpusState, asJSON bool) error {
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		return enc.Encode(st)
+	}
+
+	fmt.Fprintf(w, "语料状态（切分 %d/%d）：\n", st.MaxRunes, st.Overlap)
+	head := []string{"语料", "片段数", "sha256（前 12 位）"}
+	rows := [][]string{}
+	for _, f := range st.Files {
+		sum := st.Fingerprints[f.Source]
+		if len(sum) > 12 {
+			sum = sum[:12]
+		}
+		rows = append(rows, []string{f.Source, fmt.Sprintf("%d", f.Chunks), sum})
+	}
+	rows = append(rows, []string{"总计", fmt.Sprintf("%d", st.TotalChunks), ""})
+	writeAligned(w, head, rows, 1)
+
+	fmt.Fprintln(w, "\n说明：只切分不嵌入，所以不花 API 调用。向量数等于片段数（每个片段一个向量）。")
+	fmt.Fprintln(w, "      要确认向量数请跑一次完整评测——报告里有 total_chunks 与实际嵌入数。")
+	return nil
+}

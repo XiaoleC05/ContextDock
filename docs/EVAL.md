@@ -255,6 +255,18 @@ go run ./cmd/eval -stamp
 重打语料指纹，**破坏性操作**，只在有意改过语料之后跑。见上一节。
 
 ```bash
+go run ./cmd/eval -corpus        # 报告语料在当前参数下的确定状态
+go run ./cmd/eval -corpus -json  # 同上，机读（CI 断言用）
+```
+
+**只切分、不嵌入**，所以不花 API 调用、也不碰存储。
+同时报出每份语料的**片段数**与**指纹**——片段数变了有两种可能
+（参数变了 / 语料变了），只看片段数分不清。
+
+> ⚠️ 评测**不需要**「重置语料」这一步：每次运行都从空的内存存储开始，
+> 灌语料是运行的一部分。见 [BENCHMARKS.md](BENCHMARKS.md) 的 #56 一节。
+
+```bash
 go run ./cmd/eval                    # 跑一次完整评测（默认参数）
 go run ./cmd/eval -json -detail      # 机读 JSON + 逐条明细
 go run ./cmd/eval -k 10 -mult 1      # 覆盖 RRF 参数
