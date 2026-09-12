@@ -384,7 +384,7 @@ go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
 
 > 两个测试工具都是 Go 写的，`go run` 就能跑——**跑测试的链路不需要额外装 Python**。
 
-当前 **92 个变异全部被捕获**。⚠️ 这个数字会随代码变化而过期，
+当前 **94 个变异全部被捕获**。⚠️ 这个数字会随代码变化而过期，
 而**没东西会自动提醒**——跑 `go run ./cmd/mutate` 打印的才是实时值。
 （本项目真实发生过一次：`chunks_at_default` 悄悄过期了一轮，
 后来才被 `-validate` 的核对发现。）
@@ -401,6 +401,8 @@ go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
 | `truncateRunes` 改成按字节截断 | `TestTruncateRunesHandlesMultiByte` |
 | 检索结果不填文档来源（**真实缺陷**） | `TestSearchReturnsSource` |
 | 导入时不下沉文档来源 | `TestIngestSinksDocumentSourceIntoChunks` |
+| 重建索引时原地改写而非换新实例（**真实缺陷**） | `TestRebuildSwapsIndexesInsteadOfMutating` |
+| `SaveDocument` 返回内部切片而非副本（**真实缺陷**） | `TestMemorySaveDocumentReturnsCopy` |
 
 > 最后两条来自一个**发布前发现并修掉的真实缺陷**：`ResultItem.Source`
 > 声明了、schema 里也写了描述（Agent 看得见），但构造它的函数从不赋值，

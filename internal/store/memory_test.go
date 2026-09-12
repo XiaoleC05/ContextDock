@@ -289,3 +289,120 @@ var (
 	_ Store = (*Memory)(nil)
 	_ Store = (*Postgres)(nil)
 )
+
+// TestMemorySaveDocumentReturnsCopy 钉住 SaveDocument 的所有权约定。
+//
+// 返回值归调用方，store 内部**不再引用**它。见 SaveDocument 的注释。
+//
+// 为什么必须有这条：调用方（ingest 回填向量）会**不持锁**地就地改写
+// 返回值的元素。如果返回值与 map 里那份是同一个切片，这个无锁的写
+// 就会和 AllChunks 在读锁下的读构成数据竞争——读锁保护不了不持锁的写方。
+func TestMemorySaveDocumentReturnsCopy(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+
+	saved, err := m.SaveDocument(ctx, mkDoc("标题", "正文"), mkChunks(2, "原始内容"))
+	if err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	if len(saved) == 0 {
+		t.Fatal("前置条件不成立：应当返回片段")
+	}
+
+	// 调用方就地改写——这正是 ingest 回填向量时做的事。
+	saved[0].Content = "被调用方改掉了"
+	saved[0].Embedding = mkVec(1)
+
+	got, err := m.ChunksByDocument(ctx, saved[0].DocumentID)
+	if err != nil {
+		t.Fatalf("读回失败: %v", err)
+	}
+	if got[0].Content != "原始内容" {
+		t.Errorf("调用方改写返回值影响到了 store 内部：content = %q。"+
+			"SaveDocument 必须返回副本", got[0].Content)
+	}
+	if len(got[0].Embedding) != 0 {
+		t.Errorf("调用方写返回值里的 Embedding 影响到了 store 内部（%d 维）。"+
+			"向量只能通过 SaveEmbeddings 落库", len(got[0].Embedding))
+	}
+}
+
+// TestMemoryEmbeddingFlowsThroughSaveEmbeddings 确认副本化之后向量仍然落得进去。
+//
+// 这是副本化最需要确认的一点：改动之前，store 内部那份数据是通过
+// **切片别名**顺带拿到向量的（ingest 写 saved[i].Embedding 的同时就写进去了），
+// 副本化切断了这条隐式通路。必须确认 SaveEmbeddings 这条**显式**的路依旧有效，
+// 否则导入的文档会静默地全部没有向量——检索只剩关键词一路。
+func TestMemoryEmbeddingFlowsThroughSaveEmbeddings(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+
+	saved, err := m.SaveDocument(ctx, mkDoc("标题", "正文"), mkChunks(2, "内容"))
+	if err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	// 模拟 ingest：拿着返回值回填向量，然后显式调用 SaveEmbeddings。
+	for i := range saved {
+		saved[i].Embedding = mkVec(float32(i))
+	}
+	if err := m.SaveEmbeddings(ctx, saved); err != nil {
+		t.Fatalf("回填向量失败: %v", err)
+	}
+
+	got, err := m.ChunksByDocument(ctx, saved[0].DocumentID)
+	if err != nil {
+		t.Fatalf("读回失败: %v", err)
+	}
+	for i := range got {
+		if len(got[i].Embedding) != types.EmbeddingDim {
+			t.Errorf("第 %d 个片段没有向量（%d 维）——"+
+				"副本化不能切断 SaveEmbeddings 这条显式通路", i, len(got[i].Embedding))
+		}
+	}
+}
+
+// TestMemoryConcurrentSaveAndAllChunks 覆盖「导入回填」与「全量读取」并发。
+//
+// 这就是 #75 描述的场景：ingest 在回填向量时**不持锁**，而 Rebuild
+// 会走 AllChunks（持读锁）。
+//
+// ⚠️ 与所有竞争类测试一样：它只能降低漏检概率，不能证明没有竞争。
+// 真正的裁判是 CI 上的 `-race`（本机没有 gcc 跑不了）。
+// 确定性的防线是上面那条 TestMemorySaveDocumentReturnsCopy。
+func TestMemoryConcurrentSaveAndAllChunks(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+
+	const rounds = 50
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(errCh)
+		for i := 0; i < rounds; i++ {
+			saved, err := m.SaveDocument(ctx, mkDoc("标题", "正文"), mkChunks(4, "内容"))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			// 模拟 ingest 回填向量：**不持锁**地改返回值。
+			for j := range saved {
+				saved[j].Embedding = mkVec(float32(j))
+			}
+			if err := m.SaveEmbeddings(ctx, saved); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < rounds; i++ {
+		if _, err := m.AllChunks(ctx); err != nil {
+			t.Fatalf("AllChunks 失败: %v", err)
+		}
+	}
+
+	if err := <-errCh; err != nil {
+		t.Errorf("并发写入失败: %v", err)
+	}
+}
