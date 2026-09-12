@@ -506,7 +506,7 @@ go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
 
 - **[开 issue](https://github.com/XiaoleC05/ContextDock/issues/new)** —— 说明复现步骤或期望行为
 - **提 PR** —— 从 `main` 切分支，CI 会跑 `gofmt` / `go vet` / `go test -race` 和集成测试
-- **动手改之前先看 [docs/DESIGN.md](docs/DESIGN.md)** —— 里面 12 条决策**有相互依赖**，
+- **动手改之前先看 [docs/DESIGN.md](docs/DESIGN.md)** —— 里面 14 条决策**有相互依赖**，
   改一条（比如向量维度）要连带改建表语句和全量向量
 
 测试怎么跑见上面的[测试](#测试)一节。
@@ -517,7 +517,7 @@ go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/DESIGN.md](docs/DESIGN.md) | 12 条关键设计决策，含被否决的替代方案 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 14 条关键设计决策（含被否决的替代方案），以及「与同类项目的关键差异」一节 |
 | [docs/PITFALLS.md](docs/PITFALLS.md) | 踩过的坑：环境 / Go 语言 / 外部 API / 数据库 |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | 性能基准与优化记录（含 pprof 分析） |
 | [docs/EVAL.md](docs/EVAL.md) | 检索评测集格式与校验命令 |
