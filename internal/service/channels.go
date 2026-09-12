@@ -43,12 +43,14 @@ func (s *Service) SearchChannels(ctx context.Context, query string, topK, rrfK, 
 		topK = s.cfg.TopK
 	}
 
-	s.idxMu.RLock()
-	bm25Empty := s.bm25.Len() == 0
-	vecEmpty := s.vecIdx.Len() == 0
-	s.idxMu.RUnlock()
+	// 取快照，理由同 Service.Search：安全性来自「已发布对象永不改写」，
+	// 不是来自把锁盖住整个检索过程。见 Service.idxMu 的说明。
+	bm25, vecIdx := s.snapshot()
 
 	out := &ChannelRuns{Query: query}
+
+	bm25Empty := bm25.Len() == 0
+	vecEmpty := vecIdx.Len() == 0
 	if bm25Empty && vecEmpty {
 		out.Degraded = "索引为空"
 		return out, nil
@@ -72,16 +74,19 @@ func (s *Service) SearchChannels(ctx context.Context, query string, topK, rrfK, 
 		out.Degraded = "没有可用的向量索引"
 	}
 
-	// 检索全程持读锁，理由同 Search。
-	s.idxMu.RLock()
-	defer s.idxMu.RUnlock()
-
+	// 检索全程**不持锁**，用上面那份快照。理由见 Service.idxMu 的说明。
+	//
+	// ⚠️ 单路向量检索（下面 out.Vector）和喂给 Hybrid 的向量检索
+	// 必须是**同一个** searcher。这两处曾经各写各的，将来接入
+	// 数据库后端时只改一处，就会出现「单路列测旧路径、融合列测新路径」
+	// 的自相矛盾，而报告照样正常打印。
+	//
 	// 单路结果取 topK，不放大。
 	//
 	// 这里**故意**不取 topK*mult：单路基线要回答的是「如果只用这一路，
 	// 用户会拿到什么」。放大候选再截断会给出比真实单路更好的结果，
 	// 从而把融合的优势压低、得出偏保守的结论——那也是一种失真。
-	out.Lexical = s.bm25.Search(query, topK)
+	out.Lexical = bm25.Search(query, topK)
 
 	if queryVec == nil {
 		if out.Degraded == "" {
@@ -92,13 +97,13 @@ func (s *Service) SearchChannels(ctx context.Context, query string, topK, rrfK, 
 	}
 
 	var err error
-	if out.Vector, err = s.vecIdx.Search(queryVec, topK); err != nil {
+	if out.Vector, err = vecIdx.Search(queryVec, topK); err != nil {
 		return nil, fmt.Errorf("service: 向量检索失败: %w", err)
 	}
 
 	hybrid := retrieve.NewHybrid(
-		retrieve.BM25Searcher{BM25: s.bm25},
-		s.vecIdx,
+		retrieve.BM25Searcher{BM25: bm25},
+		vecIdx,
 	).WithTimeout(s.cfg.SearchTimeout)
 	if rrfK > 0 {
 		hybrid = hybrid.WithRRFK(rrfK)

@@ -704,6 +704,36 @@ var mutations = []mutation{
 		old:  `if i >= len(doc) || doc[i].Ordinal != c.Ordinal {`,
 		new:  `if false {`,
 	},
+	{
+		// 重建时**原地改写**已发布的索引，而不是造新实例换指针。
+		//
+		// 这是 #74 修掉的那类竞争：hybrid 的超时分支会直接 return
+		// 而不排空另一个仍在读索引的 goroutine，而 Service.Search
+		// 只用快照、早已脱离锁——只要重建改写旧对象，那个落下的
+		// goroutine 读到的就是写了一半的状态。
+		//
+		// 抓住它的必须是**确定性断言**，不能指望 -race 的时序运气：
+		// TestRebuildSwapsIndexesInsteadOfMutating 直接比较重建前后
+		// 旧实例的长度。这个变异验证那个断言真的有效。
+		name: "service: 重建时原地改写索引而非换新实例",
+		file: "internal/service/service.go",
+		old:  `	s.bm25 = bm25`,
+		new:  `	s.bm25.Index(chunks)`,
+	},
+	{
+		// SaveDocument 返回**内部那个切片**而不是副本。
+		//
+		// 调用方（ingest 回填向量）会不持锁地就地改写返回值，
+		// 于是与 AllChunks 在读锁下的读构成竞争——读锁保护不了
+		// 不持锁的写方。见 #75。
+		//
+		// 这个变异验证 TestMemorySaveDocumentReturnsCopy 的断言
+		// 真的在守着所有权边界，而不是碰巧通过。
+		name: "store: SaveDocument 返回内部切片而非副本",
+		file: "internal/store/memory.go",
+		old:  `	return append([]types.Chunk(nil), out...), nil`,
+		new:  `	return out, nil`,
+	},
 
 	// ---- eval 指标 ----
 	// 下面这几条都属于同一类：**不报错，只是数字变好看**。

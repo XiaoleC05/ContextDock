@@ -34,11 +34,31 @@ type Service struct {
 	store    store.Store
 	ingester *ingest.Ingester
 
-	// idxMu 保护下面两个索引。
+	// tok 是分词器。索引端与查询端共用同一套规则，
+	// 重建时要用它造新的 BM25 实例。
+	tok *tokenize.Tokenizer
+
+	// idxMu 保护下面几个字段——**只保护「读指针 / 换指针」，不保护检索过程**。
 	//
-	// BM25 和 VectorIndex 都**不是**并发安全的：Index 会重建内部状态。
-	// 检索时读、重建时写，用 RWMutex 隔开——否则并发检索会读到
-	// 重建到一半的索引，结果不可预期而且 `-race` 之外很难发现。
+	// # 不变量：已发布的索引对象此后永不改写
+	//
+	// BM25 和 VectorIndex 都不是并发安全的（Index 会重建内部状态），
+	// 所以重建的做法是「锁外构造全新实例，最后只拿写锁换指针」，
+	// **绝不对已发布的实例再调 Index()**。
+	//
+	// 这条不变量比「用锁把检索整个盖住」更强，而且它是必需的：
+	// 检索会在锁外长时间运行，超时那次尤其——`hybrid.go` 的 ctx.Done
+	// 分支会直接 return，**不排空另一个还在读索引的 goroutine**。
+	// 如果重建是原地改写，那个孤儿 goroutine 就会读到写了一半的状态。
+	//
+	// ⚠️ 所以：**不要把锁加回检索过程**。历史上这里出过一次事故
+	// （提前解锁导致真实数据竞争，CI 上被 -race 抓到），当时的修法是
+	// 扩大锁范围；但那个修法只是把窗口缩小，并没有消除——因为
+	// Service.Search 的 defer RUnlock 在孤儿 goroutine 结束**之前**
+	// 就执行了。真正的解法是让对象不可变，不是让锁盖得更久。
+	//
+	// ⚠️ 反过来，任何对已发布实例的原地修改都会让这条不变量失效。
+	// 增量更新 BM25（改 df / avgdl）就是这类改动，做之前先看这条注释。
 	idxMu  sync.RWMutex
 	bm25   *retrieve.BM25
 	vecIdx *retrieve.VectorIndex
@@ -100,15 +120,20 @@ func New(cfg *config.Config, emb embed.Embedder, st store.Store) (*Service, erro
 		return nil, fmt.Errorf("service: 创建切分器失败: %w", err)
 	}
 
+	// 分词方案来自配置，索引端与查询端共用这一个实例——
+	// 两边用不同的分词器会让召回静默对不上（见 tokenize 包的说明）。
+	// 单独取出来是因为 Rebuild 每次都要造新的 BM25 实例，
+	// 而新旧实例必须共用**同一个**分词器。
+	tok := tokenize.NewWith(cfg.TokenizeScheme)
+
 	return &Service{
 		cfg:      cfg,
 		embedder: emb,
 		store:    st,
 		ingester: ingest.New(chunker, emb, st),
-		// 分词方案来自配置，索引端与查询端共用这一个实例——
-		// 两边用不同的分词器会让召回静默对不上（见 tokenize 包的说明）。
-		bm25:   retrieve.NewBM25().WithTokenizer(tokenize.NewWith(cfg.TokenizeScheme)),
-		vecIdx: retrieve.NewVectorIndex(),
+		tok:      tok,
+		bm25:     retrieve.NewBM25().WithTokenizer(tok),
+		vecIdx:   retrieve.NewVectorIndex(),
 	}, nil
 }
 
@@ -118,16 +143,26 @@ func New(cfg *config.Config, emb embed.Embedder, st store.Store) (*Service, erro
 //
 // 单条片段没有向量时（比如上次导入在嵌入阶段失败了），
 // 它仍然会进 BM25 索引——关键词检索不依赖向量。
+//
+// # 锁外构造，最后换指针
+//
+// 全程**不在写锁下碰已有对象**：先在锁外把新实例全部造好，成功之后
+// 只拿写锁做几个字段赋值。依据见 Service.idxMu 上的不变量说明。
+//
+// 这同时修掉了一处既有缺陷：原来的顺序是「先换 BM25 → 再 Index 向量」，
+// 后者失败时返回错误、而 rebuildFromStore 只打一行日志继续跑，
+// 于是留下**一半新一半旧**的部分重建，且没有任何信号。
+// 现在要么整体成功、要么一个字段都不动。
 func (s *Service) Rebuild(ctx context.Context) error {
 	chunks, err := s.store.AllChunks(ctx)
 	if err != nil {
 		return fmt.Errorf("service: 读取全部片段失败: %w", err)
 	}
 
-	s.idxMu.Lock()
-	defer s.idxMu.Unlock()
+	// ---- 以下全部在锁外构造 ----
 
-	s.bm25.Index(chunks)
+	bm25 := retrieve.NewBM25().WithTokenizer(s.tok)
+	bm25.Index(chunks)
 
 	// 只有带向量的片段才能进向量索引。
 	withVec := make([]types.Chunk, 0, len(chunks))
@@ -136,12 +171,10 @@ func (s *Service) Rebuild(ctx context.Context) error {
 			withVec = append(withVec, c)
 		}
 	}
-	if err := s.vecIdx.Index(withVec); err != nil {
+	vecIdx := retrieve.NewVectorIndex()
+	if err := vecIdx.Index(withVec); err != nil {
 		return fmt.Errorf("service: 重建向量索引失败: %w", err)
 	}
-
-	s.indexedChunks = len(chunks)
-	s.embeddedCount = len(withVec)
 
 	// 正文体积在重建时顺手算掉：评测要用它判断「切得越碎、索引涨多快」，
 	// 而为此再遍历一遍全部片段不值得。
@@ -149,7 +182,6 @@ func (s *Service) Rebuild(ctx context.Context) error {
 	for _, c := range chunks {
 		textBytes += int64(len(c.Content))
 	}
-	s.textBytes = textBytes
 
 	// 顺手按文档分组，供上下文扩展取相邻片段。
 	// 组内顺序由 AllChunks 保证（它按 (document_id, ordinal) 读出），
@@ -162,7 +194,19 @@ func (s *Service) Rebuild(ctx context.Context) error {
 		doc := byDoc[id]
 		sort.Slice(doc, func(i, j int) bool { return doc[i].Ordinal < doc[j].Ordinal })
 	}
+
+	// ---- 到这里才动共享状态，且只做赋值 ----
+	//
+	// ⚠️ 绝不能在这里加回任何对 s.bm25 / s.vecIdx 的原地修改，
+	// 那会让「已发布对象永不改写」失效。见 Service.idxMu 的说明。
+	s.idxMu.Lock()
+	s.bm25 = bm25
+	s.vecIdx = vecIdx
 	s.byDoc = byDoc
+	s.indexedChunks = len(chunks)
+	s.embeddedCount = len(withVec)
+	s.textBytes = textBytes
+	s.idxMu.Unlock()
 
 	if len(chunks) > 0 && len(withVec) < len(chunks) {
 		// 这条日志很重要：说明有一批片段没有向量，
@@ -171,6 +215,16 @@ func (s *Service) Rebuild(ctx context.Context) error {
 			len(chunks)-len(withVec), len(chunks))
 	}
 	return nil
+}
+
+// snapshot 在锁内取出当前索引的引用，供调用方在**锁外**使用。
+//
+// 返回的对象依据 Rebuild 的不变量保证不会再被改写，所以调用方
+// 拿它们跑多久都不会与重建冲突。
+func (s *Service) snapshot() (*retrieve.BM25, *retrieve.VectorIndex) {
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	return s.bm25, s.vecIdx
 }
 
 // Stats 返回索引状态，供日志和诊断使用。
@@ -213,13 +267,16 @@ func (s *Service) Search(ctx context.Context, query string, topK int) (*SearchOu
 		topK = s.cfg.TopK
 	}
 
-	// ---- 读一次索引规模 ----
-	s.idxMu.RLock()
-	bm25Empty := s.bm25.Len() == 0
-	vecEmpty := s.vecIdx.Len() == 0
-	s.idxMu.RUnlock()
+	// ---- 取快照：只在锁内读指针，检索全程不持锁 ----
+	//
+	// 安全性来自 Rebuild 的「已发布对象永不改写」不变量，
+	// **不是**来自「锁覆盖住了检索」。见 Service.idxMu 的说明。
+	bm25, vecIdx := s.snapshot()
 
 	out := &SearchOutput{Query: query, TopK: topK}
+
+	bm25Empty := bm25.Len() == 0
+	vecEmpty := vecIdx.Len() == 0
 
 	// 两路都不可用时没有降级空间，直接返回空。
 	if bm25Empty && vecEmpty {
@@ -247,28 +304,29 @@ func (s *Service) Search(ctx context.Context, query string, topK int) (*SearchOu
 		out.Degraded = "没有可用的向量索引，已降级为关键词检索"
 	}
 
-	// ---- 检索：全程持读锁 ----
+	// ---- 检索：用快照，**不持锁** ----
 	//
-	// ⚠️ 锁必须一直覆盖到 Search 返回。
+	// ⚠️ 这里刻意不再持读锁。
 	//
-	// 这里曾经提前 RUnlock 了，导致并发的 Rebuild（持写锁）可以在
-	// Search 读索引的过程中重建索引——**真的数据竞争**。
-	// 本机跑不了 -race 所以一直没暴露，直到 CI 上才报出来。
+	// 历史：这里曾经在检索过程中提前 RUnlock，导致并发的 Rebuild
+	// 可以在检索读索引时重建索引——真实数据竞争，CI 上被 -race 抓到。
+	// 当时的修法是「把锁扩大到覆盖整个检索」，但那只是缩小了窗口：
+	// hybrid.Search 内部有两个 goroutine，超时分支会**直接 return 而
+	// 不排空另一个**，于是 Service.Search 的 defer RUnlock 会在那个
+	// goroutine 还在读索引时就执行。
 	//
-	// 教训：注释里写「用 RWMutex 隔开」不等于代码真的隔开了。
-	// 锁的作用域要盯到实际访问共享数据的那几行为止。
-	s.idxMu.RLock()
-	defer s.idxMu.RUnlock()
-
+	// 现在真正的保证换成了「已发布对象永不改写」（见 Service.idxMu）：
+	// 快照拿到的那份索引是完整的、不会再变的，检索跑多久都行。
+	// 锁只需要保护「读指针」这一瞬间。
 	if queryVec == nil {
 		// 纯关键词路径
-		out.Results = s.bm25.Search(query, topK)
+		out.Results = bm25.Search(query, topK)
 		return out, nil
 	}
 
 	hybrid := retrieve.NewHybrid(
-		retrieve.BM25Searcher{BM25: s.bm25},
-		s.vecIdx,
+		retrieve.BM25Searcher{BM25: bm25},
+		vecIdx,
 	).WithTimeout(s.cfg.SearchTimeout).
 		WithErrorHandler(func(r types.Retriever, err error) {
 			log.Printf("%s 检索失败，已降级: %v", r, err)

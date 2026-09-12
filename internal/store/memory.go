@@ -75,7 +75,22 @@ func (m *Memory) SaveDocument(ctx context.Context, doc *types.Document, chunks [
 	}
 	m.docs[doc.ID] = *doc
 	m.chunks[doc.ID] = out
-	return out, nil
+
+	// ⚠️ 返回**副本**，不是 out 本身。
+	//
+	// 调用方拿到之后会就地改写元素：ingest 回填向量时写
+	// `saved[i].Embedding = vecs[i]`，而**那一步不持锁**。
+	// 如果返回的是存在 map 里的那一个切片，这个无锁的写就会和
+	// AllChunks 在读锁下的读构成数据竞争——读锁保护不了不持锁的写方。
+	//
+	// 副本化之后所有权是清楚的：交出去的归调用方，store 内部那一份
+	// 只有 store 自己能碰，而 store 的每次访问都在锁下。
+	//
+	// 边界：这是**浅拷贝**。调用方替换元素（`saved[i] = ...`）不会
+	// 影响 store；但透过 `Embedding` 那个切片去改**底层数组的元素**
+	// 仍会共享。当前没有代码这么做，也不该这么做——要改向量请走
+	// SaveEmbeddings，那条路是在锁内写的。
+	return append([]types.Chunk(nil), out...), nil
 }
 
 // AllChunks 实现 Store。

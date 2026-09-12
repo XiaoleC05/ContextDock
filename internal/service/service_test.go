@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/XiaoleC05/ContextDock/internal/config"
 	"github.com/XiaoleC05/ContextDock/internal/embed"
@@ -329,8 +330,14 @@ func TestServiceSearchTopKDefault(t *testing.T) {
 
 // TestServiceConcurrentSearchAndRebuild 守护索引的并发保护。
 //
-// BM25 / VectorIndex 都不是并发安全的：Index 会重建内部状态。
-// 检索时读、重建时写，不加锁的话会读到重建到一半的索引。
+// ⚠️ 它守护的**不是**「锁盖住了整个检索过程」——那条路已经废弃，
+// 见 Service.idxMu 上的不变量说明。现在保证安全的是「重建换指针、
+// 不改写已发布对象」，这个测试验证的是并发重建期间检索依然自洽。
+//
+// ⚠️ 它**覆盖不到 hybrid 的超时分支**：默认 5s 超时下，内存检索
+// 永远不会超时，所以 `<-ctx.Done()` 那条路走不到。那条路由
+// TestSearchTimeoutDoesNotRaceWithRebuild 专门覆盖。
+//
 // 这个测试要用 -race 跑才有意义。
 func TestServiceConcurrentSearchAndRebuild(t *testing.T) {
 	ctx := context.Background()
@@ -351,6 +358,108 @@ func TestServiceConcurrentSearchAndRebuild(t *testing.T) {
 		if _, err := svc.Search(ctx, "测试内容", 5); err != nil && !errors.Is(err, context.Canceled) {
 			t.Errorf("并发检索失败: %v", err)
 		}
+	}
+	<-done
+}
+
+// TestRebuildSwapsIndexesInsteadOfMutating 钉住「已发布对象永不改写」这条不变量。
+//
+// 这是 #74 那类数据竞争的**根因防线**，而且是确定性的——
+// 不依赖 -race 的时序运气。
+//
+// 机制：只要重建是「造新实例、换指针」，那么任何还在使用旧索引的
+// goroutine（比如 hybrid 超时后被落下的那个）读到的就永远是一份
+// 完整、一致的数据，锁有没有盖住它都不再重要。
+//
+// 反过来，如果哪天有人把 Rebuild 改回对已有实例调 Index()，
+// 这个测试会立刻红。
+func TestRebuildSwapsIndexesInsteadOfMutating(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestService(t, nil)
+
+	// ⚠️ 两份文档必须有不同的 Source。
+	//
+	// 去重键是按**来源**算的（types.DedupKey）：来源为空时退回内容指纹，
+	// 而两份内容一模一样 → 相同的指纹 → 第二份会把第一份**替换**掉，
+	// 索引根本不会变大。这个测试第一次就是这么写错的。
+	if _, err := svc.Import(ctx, &types.Document{
+		Title: "第一份", Source: "doc-a", Content: longText(8),
+	}); err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+
+	oldBM25, oldVec := svc.snapshot()
+	oldBM25Len := oldBM25.Len()
+	oldVecLen := oldVec.Len()
+	if oldBM25Len == 0 || oldVecLen == 0 {
+		t.Fatal("前置条件不成立：导入之后索引应当非空")
+	}
+
+	// 再导入一份**不同来源**的文档，触发一次增量式的 Rebuild。
+	if _, err := svc.Import(ctx, &types.Document{
+		Title: "第二份", Source: "doc-b", Content: longText(8),
+	}); err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+
+	newBM25, newVec := svc.snapshot()
+	if newBM25.Len() <= oldBM25Len {
+		t.Fatalf("重建后索引应当变大：BM25 %d -> %d", oldBM25Len, newBM25.Len())
+	}
+	if newVec.Len() <= oldVecLen {
+		t.Fatalf("重建后向量索引应当变大：%d -> %d", oldVecLen, newVec.Len())
+	}
+
+	// ⚠️ 关键断言：旧对象必须**原封不动**。
+	//
+	// 原地改写的实现会让 oldBM25Len 跟着变大——因为那个指针指向的
+	// 就是被改写的那一个对象。
+	if got := oldBM25.Len(); got != oldBM25Len {
+		t.Errorf("旧 BM25 被原地改写了：%d -> %d。"+
+			"Rebuild 必须造新实例再换指针，不能对已发布的实例调 Index()", oldBM25Len, got)
+	}
+	if got := oldVec.Len(); got != oldVecLen {
+		t.Errorf("旧 VectorIndex 被原地改写了：%d -> %d", oldVecLen, got)
+	}
+}
+
+// TestSearchTimeoutDoesNotRaceWithRebuild 专打 hybrid 的**超时分支**。
+//
+// 为什么需要它：`hybrid.go` 的 `<-ctx.Done()` 分支会直接 return，
+// **不排空另一个仍在读索引的 goroutine**。那个被落下的 goroutine
+// 与并发的 Rebuild 之间就是 #74 描述的竞争。默认 5s 超时下这条分支
+// 在内存检索里永远走不到，所以既有测试覆盖不到。
+//
+// 做法是把 SearchTimeout 压到 1ns，让每次混合检索都走超时分支。
+//
+// ⚠️ 诚实说明：**竞争类测试只能降低漏检概率，不能证明没有竞争**。
+// 它真正的裁判是 CI 上的 `-race`。本机没有 gcc 跑不了 -race。
+// 真正的防线是 TestRebuildSwapsIndexesInsteadOfMutating 那条确定性断言。
+//
+// ⚠️ 超时后 Service.Search 会返回错误，那是**预期行为**（拿不到足够
+// 结果时宁可报错也不返回半份），所以这里只忽略错误、不做断言。
+func TestSearchTimeoutDoesNotRaceWithRebuild(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestService(t, nil)
+	svc.cfg.SearchTimeout = time.Nanosecond
+
+	// 语料大一点，让每次检索持续得久一些，扩大与 Rebuild 的重叠窗口。
+	if _, err := svc.Import(ctx, &types.Document{Title: "d", Content: longText(40)}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 20; i++ {
+			_ = svc.Rebuild(ctx)
+		}
+	}()
+
+	for i := 0; i < 40; i++ {
+		// 两条路都要走：Search 走融合，SearchChannels 走单路 + 融合。
+		_, _ = svc.Search(ctx, "测试内容", 5)
+		_, _ = svc.SearchChannels(ctx, "测试内容", 5, 0, 0)
 	}
 	<-done
 }
