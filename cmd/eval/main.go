@@ -50,7 +50,7 @@ func run() error {
 		// 靠的就是「同一份评测集 + 不同参数 → 可比的数字」。
 		topK     = flag.Int("topk", 0, "每条查询保留的结果条数（recall@k 的 k），默认 10")
 		rrfK     = flag.Int("k", 0, "RRF 平滑常数，默认 60")
-		mult     = flag.Int("mult", 0, "融合前的候选放大倍数，默认 3")
+		mult     = flag.Int("mult", 0, "融合前的候选放大倍数，默认 1")
 		maxRunes = flag.Int("maxrunes", 0, "切分最大字符数，默认 400")
 		overlap  = flag.Int("overlap", -1, "切分重叠字符数，默认 60（0 是合法值，故默认 -1）")
 		ndcgK    = flag.Int("ndcgk", 0, "NDCG 的截断位置，默认 10")
