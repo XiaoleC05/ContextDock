@@ -419,6 +419,71 @@ var mutations = []mutation{
 		old:  `e.Grade = GradeFull`,
 		new:  `e.Grade = GradePartial`,
 	},
+
+	// ---- eval 指标 ----
+	// 下面这几条都属于同一类：**不报错，只是数字变好看**。
+	// 指标算错了评测照样跑完、照样打印一张像模像样的表格，
+	// 而所有基于它的结论都是错的。这类变异正是变异测试存在的理由。
+	{
+		// 没有来源的期望一律不命中。手搓 Expect 时 source 是空的，
+		// 而空来源会与同样没有 source 元数据的片段"相等"，
+		// 于是零值区间被当成压在文档开头，所有查询都轻松命中。
+		name: "eval: 命中判定不防「没有来源的期望」",
+		file: "internal/eval/metrics.go",
+		old:  `if e.Source == "" {`,
+		new:  `if false {`,
+	},
+	{
+		// 不校验来源：区间相同但出自另一份语料也算命中，recall 虚高。
+		name: "eval: 命中判定不校验来源语料",
+		file: "internal/eval/metrics.go",
+		old:  `if r.Chunk.Metadata[types.MetadataKeySource] != e.Source {`,
+		new:  `if false {`,
+	},
+	{
+		// recall 的分母写错：多跳查询只命中一半会被算成 1，高估多跳场景。
+		name: "eval: recall 分母写错（多跳只命中一半算满分）",
+		file: "internal/eval/metrics.go",
+		old:  `sc.Recall = float64(len(sc.Matched)) / float64(sc.Total)`,
+		new:  `sc.Recall = float64(len(sc.Matched))`,
+	},
+	{
+		// 分级失效：部分相关与完全回答拿到同样的增益。
+		name: "eval: NDCG 增益忽略相关性分级",
+		file: "internal/eval/metrics.go",
+		old:  `return math.Pow(2, float64(e.Grade)) - 1`,
+		new:  `return 1`,
+	},
+	{
+		// 同一片段压住两条期望时重复计分，NDCG 会超过 1。
+		name: "eval: 同一片段的增益被重复计入",
+		file: "internal/eval/metrics.go",
+		old:  `if matched[i] || !covers(r, expects[i]) {`,
+		new:  `if !covers(r, expects[i]) {`,
+	},
+	{
+		name: "eval: NDCG 不按截断位置截断",
+		file: "internal/eval/metrics.go",
+		old:  `if rank <= ndcgK {`,
+		new:  `if true {`,
+	},
+
+	// ---- 嵌入缓存 ----
+	{
+		// 键里不带模型名：换模型后会静默读到旧模型的向量，
+		// 维度一样、跑得通，只是语义空间完全不同。
+		name: "embed: 缓存键里不带模型名",
+		file: "internal/embed/cache.go",
+		old:  `h.Write([]byte(c.model))`,
+		new:  `_ = c.model`,
+	},
+	{
+		// 缓存不生效：命中率永远 0，参数扫描从几分钟变几小时。
+		name: "embed: 缓存从不命中",
+		file: "internal/embed/cache.go",
+		old:  `if v, ok := c.load(t); ok {`,
+		new:  `if v, ok := c.load(t); false && ok {`,
+	},
 }
 
 // ---------------------------------------------------------------------------
