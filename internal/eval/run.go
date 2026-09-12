@@ -3,6 +3,8 @@ package eval
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
 	"time"
 
 	"github.com/XiaoleC05/ContextDock/internal/config"
@@ -116,6 +118,21 @@ func (o Options) Normalize() Options {
 	return o
 }
 
+// Latency 是单次检索的耗时分布（毫秒）。
+//
+// 用 P50/P95 而不是平均值：检索耗时是长尾分布，平均值会被少数慢查询
+// 拉高，既不代表"典型体验"也不代表"最差体验"。
+//
+// ⚠️ 它包含**查询嵌入**的耗时。暖缓存时那是一次磁盘读（亚毫秒），
+// 于是这个数主要反映检索本身；冷缓存时会被网络往返淹没。
+// 改候选倍数这类参数只会影响检索部分，所以比较**必须**在暖缓存下做——
+// 报告里的缓存命中数就是用来判断这一点的。
+type Latency struct {
+	P50Ms float64 `json:"p50_ms"`
+	P95Ms float64 `json:"p95_ms"`
+	MaxMs float64 `json:"max_ms"`
+}
+
 // CorpusStat 是一份语料在本次参数下的规模。
 type CorpusStat struct {
 	Source string `json:"source"`
@@ -201,6 +218,9 @@ type Report struct {
 
 	// Groups 按 AllGroups 顺序排列。
 	Groups []GroupReport `json:"groups"`
+
+	// Latency 是单次检索的耗时分布。
+	Latency Latency `json:"latency"`
 
 	// Overall 是全部查询的汇总。
 	Overall map[Channel]Aggregate `json:"overall"`
@@ -314,6 +334,11 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		statsOf = c.Stats
 	}
 
+	// 每次检索的耗时，跑完查询后算分位数。
+	// 预分配到查询总数，避免在计时循环里触发扩容——
+	// 扩容本身会体现在被测量的那段代码旁边，虽然不在里面，但没必要冒这个险。
+	latencies := make([]float64, 0, len(suite.Queries()))
+
 	for _, set := range suite.Sets {
 		gr := GroupReport{
 			Group:     set.Group,
@@ -324,7 +349,9 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		for i := range set.Queries {
 			q := &set.Queries[i]
 
+			searchStart := time.Now()
 			runs, err := svc.SearchChannels(ctx, q.Query, opt.TopK, opt.RRFK, opt.Mult)
+			latencies = append(latencies, float64(time.Since(searchStart).Microseconds())/1000)
 			if err != nil {
 				return nil, fmt.Errorf("eval: 查询 %s 失败: %w", q.ID, err)
 			}
@@ -387,6 +414,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 	if statsOf != nil {
 		rep.Embed = statsOf()
 	}
+	rep.Latency = percentiles(latencies)
 
 	// ⚠️ 必须先取出来再放回去：map 的元素不可取址，
 	// 而 Mean() 是指针接收者，直接写 rep.Overall[ch].Mean() 编译不过。
@@ -401,4 +429,23 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		}
 	}
 	return rep, nil
+}
+
+// percentiles 计算耗时分布。
+//
+// 用最近秩（nearest-rank）而不是插值：插值出来的"P95"可能不是任何一次
+// 真实检索的耗时，而看这个数的人想知道的恰恰是"最慢的那几次有多慢"。
+// 样本量只有几十条时，插值的意义也不大。
+func percentiles(ms []float64) Latency {
+	if len(ms) == 0 {
+		return Latency{}
+	}
+	// 复制一份再排序：调用方传进来的切片不该被这个函数改掉。
+	s := append([]float64(nil), ms...)
+	sort.Float64s(s)
+	at := func(p float64) float64 {
+		i := int(math.Ceil(p/100*float64(len(s)))) - 1
+		return s[max(0, min(i, len(s)-1))]
+	}
+	return Latency{P50Ms: at(50), P95Ms: at(95), MaxMs: s[len(s)-1]}
 }

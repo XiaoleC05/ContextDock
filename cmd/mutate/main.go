@@ -481,6 +481,21 @@ var mutations = []mutation{
 
 	// ---- 嵌入缓存 ----
 	{
+		// 分位数算错一位：P95 报出来的是别的值。看这个数的人
+		// 想知道的恰恰是"最慢的那几次有多慢"，报错了他也看不出来。
+		name: "eval: 延迟分位数算错一位",
+		file: "internal/eval/run.go",
+		old:  `i := int(math.Ceil(p/100*float64(len(s)))) - 1`,
+		new:  `i := int(math.Ceil(p/100*float64(len(s))))`,
+	},
+	{
+		// 分位数就地排序：把调用方的切片改掉了，后续用它的顺序全乱。
+		name: "eval: 算分位数时就地排序了输入切片",
+		file: "internal/eval/run.go",
+		old:  `s := append([]float64(nil), ms...)`,
+		new:  `s := ms`,
+	},
+	{
 		// 同上，在评测这一层：`-overlap 0` 被静默换成 60，
 		// 参数扫描里 Overlap=0 那一整列都是假的。
 		name: "eval: 候选重叠 0 被当成未传",

@@ -50,6 +50,10 @@ func WriteTable(w io.Writer, rep *Report) error {
 	// ---- 精确 token 组：词法必须命中 ----
 	writeLexicalRequired(w, rep)
 
+	fmt.Fprintf(w, "检索延迟：P50 %.1fms / P95 %.1fms / 最慢 %.1fms（含查询嵌入）\n",
+		rep.Latency.P50Ms, rep.Latency.P95Ms, rep.Latency.MaxMs)
+	fmt.Fprintln(w)
+
 	if rep.Embed.Hits+rep.Embed.Misses > 0 {
 		n := rep.Embed.Hits + rep.Embed.Misses
 		fmt.Fprintf(w, "嵌入缓存：命中 %d / %d（%.1f%%）\n",
