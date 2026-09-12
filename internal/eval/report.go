@@ -47,6 +47,22 @@ func WriteTable(w io.Writer, rep *Report) error {
 	writeGainTable(w, rep)
 	fmt.Fprintln(w)
 
+	// ---- 上下文扩展的收益（#49）----
+	if len(rep.ExpandedRecall) > 0 {
+		fmt.Fprintln(w, "上下文扩展（每条结果带出相邻片段后）的召回：")
+		head := []string{"通道", "仅命中", "含相邻片段", "提升"}
+		rows := [][]string{}
+		for _, ch := range AllChannels {
+			base := rep.Overall[ch].Recall
+			rows = append(rows, []string{
+				string(ch), pct(base), pct(rep.ExpandedRecall[ch]),
+				signed(rep.ExpandedRecall[ch] - base),
+			})
+		}
+		writeAligned(w, head, rows, 3)
+		fmt.Fprintln(w)
+	}
+
 	// ---- 精确 token 组：词法必须命中 ----
 	writeLexicalRequired(w, rep)
 

@@ -502,6 +502,22 @@ func run() error {
 	}
 	check(hasSmokeSource, fmt.Sprintf("本次导入的结果带上了 source（实际 %q）", sources))
 
+	// 上下文扩展（#49）：命中片段应当带出相邻片段的摘要。
+	//
+	// 这条断言的价值在于它走的是**完整的序列化链路**——从 service 取邻居、
+	// 塞进 DTO、过一遍 JSON、再读回来。`source` 当年就栽在这个接缝上：
+	// 字段声明了、jsonschema 里也有描述，但构造它的函数从不赋值，
+	// 而单元测试一次都没提到过那个字段。**声明 ≠ 赋值。**
+	var withContext int
+	for _, item := range results {
+		m := asMap(item)
+		if asString(m["context_before"]) != "" || asString(m["context_after"]) != "" {
+			withContext++
+		}
+	}
+	check(withContext > 0,
+		fmt.Sprintf("命中的片段带出了相邻片段摘要（%d/%d 条有）", withContext, len(results)))
+
 	// 输出里绝不能有向量。
 	//
 	// ⚠️ 必须**按键名**判断，不能用子串——`matched_by` 的合法取值里

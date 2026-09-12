@@ -463,6 +463,36 @@ var mutations = []mutation{
 		new:  `e.Grade = GradePartial`,
 	},
 
+	// ---- 上下文扩展（#49）----
+	{
+		// 前一段取头部：给 Agent 看一段它根本接不上的话，比不给还糟。
+		name: "mcp: context_before 取了前一段的头部",
+		file: "internal/mcp/server.go",
+		old:  `item.ContextBefore = tailRunes(prev[n-1].Content, contextSnippetRunes)`,
+		new:  `item.ContextBefore = headRunes(prev[n-1].Content, contextSnippetRunes)`,
+	},
+	{
+		name: "mcp: context_after 取了后一段的尾部",
+		file: "internal/mcp/server.go",
+		old:  `item.ContextAfter = headRunes(next[0].Content, contextSnippetRunes)`,
+		new:  `item.ContextAfter = tailRunes(next[0].Content, contextSnippetRunes)`,
+	},
+	{
+		// 按字节截断：中文会被切成半个、输出乱码，而且不报错。
+		name: "mcp: 上下文摘要按字节截断",
+		file: "internal/mcp/server.go",
+		old:  `return string(r[:n]) + "…"`,
+		new:  `return s[:n] + "…"`,
+	},
+	{
+		// 找不到自己时瞎猜一个位置：会把别的片段的正文当成"上下文"贴上去，
+		// 而 Agent 无从分辨。
+		name: "service: 取邻居时找不到自己也不返回空",
+		file: "internal/service/neighbors.go",
+		old:  `if i >= len(doc) || doc[i].Ordinal != c.Ordinal {`,
+		new:  `if false {`,
+	},
+
 	// ---- eval 指标 ----
 	// 下面这几条都属于同一类：**不报错，只是数字变好看**。
 	// 指标算错了评测照样跑完、照样打印一张像模像样的表格，

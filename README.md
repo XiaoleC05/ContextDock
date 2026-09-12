@@ -170,11 +170,16 @@ docker exec -i contextdock-pg psql -U postgres -d contextdock \
 | 工具 | 输入 | 输出 |
 | --- | --- | --- |
 | `import_document` | `content` 或 `file_path`（.txt / .md）、`title`、`source` | 文档 ID、切分出的片段数、成功嵌入的片段数 |
-| `search_knowledge_base` | `query`、`top_k` | 片段正文 + `heading` 面包屑 + `source` 来源 + `matched_by` 命中通道 + `score` |
+| `search_knowledge_base` | `query`、`top_k` | 片段正文 + `heading` 面包屑 + `source` 来源 + `matched_by` 命中通道 + `score` + `context_before` / `context_after` 相邻片段摘要 |
 
 > `source` 是每个片段的**溯源标签**：传 `file_path` 时默认是文件路径，
 > 直接传文本时是 `"inline"`，也可以显式指定。它让 Agent 能回答
 > 「这段话出自哪份文档」，而不是只拿到一堆无出处的文本。
+>
+> `context_before` / `context_after` 是命中片段**前后相邻片段的一小段摘要**
+> （各截断到 120 字符，前一段取尾、后一段取头）。命中片段常常只写着
+> 「运行 go build」，带上前一段的尾部才知道它在讲什么。截断而不是整段带出，
+> 是因为 Agent 的上下文窗口是稀缺资源，而相邻片段本来就重叠着 60 个字符。
 >
 > `search_knowledge_base` 的输出**不含向量**。这不是靠 `json:"-"` 标签挡的，
 > 而是用了独立的 DTO——**从类型上**保证向量进不了 Agent 的上下文
@@ -198,6 +203,7 @@ docker exec -i contextdock-pg psql -U postgres -d contextdock \
 | `CONTEXTDOCK_CHUNK_MAX_RUNES` | `400` | 单个片段的最大**字符**数（不是字节） |
 | `CONTEXTDOCK_CHUNK_OVERLAP` | `60` | 相邻片段的重叠字符数 |
 | `CONTEXTDOCK_POOL_MAX_CONNS` | `8` | 数据库连接池上限 |
+| `CONTEXTDOCK_CONTEXT_NEIGHBORS` | `1` | 每条结果带出前后各几段相邻片段的**摘要**（0 = 关） |
 
 > ⚠️ **换 Embedding 模型要三处同改**：模型名、`types.EmbeddingDim` 常量、建表语句的
 > `vector(1024)`，然后重建表和索引、重灌全量向量。这是全项目最贵的一次改动。

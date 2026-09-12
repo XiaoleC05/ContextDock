@@ -61,6 +61,10 @@ type Options struct {
 	// 空值表示用默认（bigram）。
 	TokenizeScheme tokenize.Scheme `json:"tokenize_scheme,omitempty"`
 
+	// ContextNeighbors 是上下文扩展的相邻片段数（#49）。
+	// > 0 时报告里会多出一列 ExpandedRecall，用来量化答案完整性的提升。
+	ContextNeighbors int `json:"context_neighbors,omitempty"`
+
 	// KeepDetail 为真时在报告里保留逐条查询的明细。
 	KeepDetail bool `json:"-"`
 }
@@ -233,6 +237,15 @@ type Report struct {
 	// Overall 是全部查询的汇总。
 	Overall map[Channel]Aggregate `json:"overall"`
 
+	// ExpandedRecall 是「结果**连同它们的相邻片段**」的召回率，按通道分。
+	//
+	// 它与 Overall[ch].Recall 的差，就是上下文扩展带来的答案完整性提升（#49）。
+	// Options.ContextNeighbors == 0 时为空。
+	//
+	// 只报召回率不报 NDCG/MRR：相邻片段没有名次，给它们编一个名次
+	// 只会让指标变成数字游戏。
+	ExpandedRecall map[Channel]float64 `json:"expanded_recall,omitempty"`
+
 	// Detail 是逐条明细，Options.KeepDetail 为真时才有内容。
 	Detail []QueryDetail `json:"detail,omitempty"`
 }
@@ -343,6 +356,10 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		statsOf = c.Stats
 	}
 
+	// 上下文扩展后的召回累计（#49）。相邻片段没有名次，
+	// 所以只累加召回率，不碰 MRR / NDCG。
+	expandedSum := make(map[Channel]float64, len(AllChannels))
+
 	// 每次检索的耗时，跑完查询后算分位数。
 	// 预分配到查询总数，避免在计时循环里触发扩容——
 	// 扩容本身会体现在被测量的那段代码旁边，虽然不在里面，但没必要冒这个险。
@@ -385,6 +402,15 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 				}
 				sc := Score(q.Expect, results, opt.NDCGK)
 				detail.ByChannel[ch] = sc
+
+				if opt.ContextNeighbors > 0 {
+					// 把每条结果的相邻片段也放进候选集，重新算一次召回。
+					// 这一步回答的是「Agent 拿到的东西够不够完整」，
+					// 而不是「检索排得好不好」——所以只看召回。
+					expandedSum[ch] += Score(q.Expect,
+						expandWithNeighbors(svc, results, opt.ContextNeighbors),
+						opt.NDCGK).Recall
+				}
 				if opt.KeepDetail {
 					if detail.Retrieved == nil {
 						detail.Retrieved = make(map[Channel][]RetrievedItem, len(AllChannels))
@@ -418,6 +444,13 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 			}
 		}
 		rep.Groups = append(rep.Groups, gr)
+	}
+
+	if opt.ContextNeighbors > 0 && len(rep.Overall) > 0 {
+		rep.ExpandedRecall = make(map[Channel]float64, len(AllChannels))
+		for _, ch := range AllChannels {
+			rep.ExpandedRecall[ch] = expandedSum[ch] / float64(rep.Overall[ch].Queries)
+		}
 	}
 
 	if statsOf != nil {
@@ -457,4 +490,42 @@ func percentiles(ms []float64) Latency {
 		return s[max(0, min(i, len(s)-1))]
 	}
 	return Latency{P50Ms: at(50), P95Ms: at(95), MaxMs: s[len(s)-1]}
+}
+
+// expandWithNeighbors 把每条结果的相邻片段并进候选集（#49）。
+//
+// # 为什么相邻片段不参与排序
+//
+// 它们不是"检索到的"，是"顺带带出来的"。给它们编一个名次会让 MRR / NDCG
+// 变成数字游戏——把邻居排前面就能刷高 MRR，而那不反映任何检索能力。
+// 所以这个函数产出的集合**只用来看召回**。
+//
+// # 为什么去重
+//
+// 相邻片段会互相重叠（一个片段可能同时是两条结果的"前一段"），
+// 重复计入不会改变召回（命中与否是布尔量），但会让集合白白变大。
+func expandWithNeighbors(svc *service.Service, results []types.SearchResult, n int) []types.SearchResult {
+	out := make([]types.SearchResult, 0, len(results)*(2*n+1))
+	seen := make(map[string]struct{}, cap(out))
+
+	add := func(c types.Chunk) {
+		k := c.StableKey()
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		out = append(out, types.SearchResult{Chunk: c})
+	}
+
+	for _, r := range results {
+		add(r.Chunk)
+		prev, next := svc.Neighbors(r.Chunk, n, n)
+		for _, c := range prev {
+			add(c)
+		}
+		for _, c := range next {
+			add(c)
+		}
+	}
+	return out
 }

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 
 	"github.com/XiaoleC05/ContextDock/internal/chunk"
@@ -41,6 +42,13 @@ type Service struct {
 	idxMu  sync.RWMutex
 	bm25   *retrieve.BM25
 	vecIdx *retrieve.VectorIndex
+
+	// byDoc 按 DocumentID 分组的片段，组内按 Ordinal 升序。
+	//
+	// 上下文扩展（#49）要用它取相邻片段。放在内存索引里而不是每次查库：
+	// 那是 O(1) 查找，而每次检索都打一次库会把延迟从亚毫秒推到毫秒级——
+	// 而检索结果已经在内存里了，再查一次库是纯粹的浪费。
+	byDoc map[int64][]types.Chunk
 
 	// 检索到的统计信息，用于日志和诊断。
 	indexedChunks int
@@ -142,6 +150,19 @@ func (s *Service) Rebuild(ctx context.Context) error {
 		textBytes += int64(len(c.Content))
 	}
 	s.textBytes = textBytes
+
+	// 顺手按文档分组，供上下文扩展取相邻片段。
+	// 组内顺序由 AllChunks 保证（它按 (document_id, ordinal) 读出），
+	// 但这里仍然不假设，下面用 Ordinal 排序兜底。
+	byDoc := make(map[int64][]types.Chunk, 16)
+	for _, c := range chunks {
+		byDoc[c.DocumentID] = append(byDoc[c.DocumentID], c)
+	}
+	for id := range byDoc {
+		doc := byDoc[id]
+		sort.Slice(doc, func(i, j int) bool { return doc[i].Ordinal < doc[j].Ordinal })
+	}
+	s.byDoc = byDoc
 
 	if len(chunks) > 0 && len(withVec) < len(chunks) {
 		// 这条日志很重要：说明有一批片段没有向量，

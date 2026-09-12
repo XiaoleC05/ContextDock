@@ -190,7 +190,29 @@ type ResultItem struct {
 	Heading string  `json:"heading,omitempty" jsonschema:"片段所属的标题层级（面包屑）"`
 	// 命中的检索通道，便于解释"为什么这条排前面"
 	MatchedBy []string `json:"matched_by,omitempty" jsonschema:"该结果被哪些检索通道命中（lexical / vector）"`
+
+	// ContextBefore / ContextAfter 是**前后相邻片段的一小段摘要**。
+	//
+	// 命中片段常常只写着「运行 go build」，单独看不知道在讲什么。
+	// 带上前一段的尾部、后一段的头部就够定位语境了。
+	//
+	// ⚠️ 是截断过的，不是完整相邻片段——见 contextSnippetRunes 的说明。
+	ContextBefore string `json:"context_before,omitempty" jsonschema:"命中片段前一段的末尾（已截断），用于理解上下文"`
+	ContextAfter  string `json:"context_after,omitempty" jsonschema:"命中片段后一段的开头（已截断），用于理解上下文"`
 }
+
+// contextSnippetRunes 是上下文摘要的截断长度（rune）。
+//
+// # 为什么截断而不是整段带出
+//
+// Agent 的上下文窗口是稀缺资源。10 条结果各带两整段（每段可达 400 字）
+// 会让输出膨胀近三倍，而那些内容**大多是重复的**——相邻片段本来就重叠 60 字。
+//
+// # 为什么前一段取尾、后一段取头
+//
+// 因为那才是紧挨着命中片段的一头。取前一段的头部等于给 Agent 看一段
+// 它根本接不上的话，比不给还糟。
+const contextSnippetRunes = 120
 
 // SearchOutput 是 search_knowledge_base 的返回。
 type SearchOutput struct {
@@ -208,6 +230,9 @@ func HandleSearch(svc *service.Service) sdkmcp.ToolHandlerFor[SearchInput, Searc
 
 		out := SearchOutput{Query: in.Query, Results: []ResultItem{}}
 
+		// 上下文扩展：每条结果带出前后各 N 段摘要。0 表示关掉。
+		neighbors := svc.ContextNeighbors()
+
 		query := strings.TrimSpace(in.Query)
 		if query == "" {
 			return nil, out, fmt.Errorf("query 不能为空")
@@ -222,7 +247,8 @@ func HandleSearch(svc *service.Service) sdkmcp.ToolHandlerFor[SearchInput, Searc
 
 		out.Degraded = res.Degraded
 		for _, r := range res.Results {
-			out.Results = append(out.Results, toResultItem(r))
+			prev, next := svc.Neighbors(r.Chunk, neighbors, neighbors)
+			out.Results = append(out.Results, toResultItem(r, prev, next))
 		}
 		out.Count = len(out.Results)
 
@@ -244,7 +270,10 @@ func HandleSearch(svc *service.Service) sdkmcp.ToolHandlerFor[SearchInput, Searc
 }
 
 // toResultItem 把内部结果转成对外的 DTO。
-func toResultItem(r types.SearchResult) ResultItem {
+//
+// prev / next 是上下文扩展带出来的相邻片段，由 svc.Neighbors 提供；
+// 传空表示不做扩展（配置里关掉了，或片段本来就在文档首尾）。
+func toResultItem(r types.SearchResult, prev, next []types.Chunk) ResultItem {
 	item := ResultItem{
 		Content: r.Chunk.Content,
 		Score:   r.Score,
@@ -259,5 +288,34 @@ func toResultItem(r types.SearchResult) ResultItem {
 	for _, m := range r.MatchedBy() {
 		item.MatchedBy = append(item.MatchedBy, string(m))
 	}
+
+	// 只取**离命中最近的那一段**：取多段会让输出线性膨胀，
+	// 而语境信息基本集中在紧挨着的那一段里。
+	if n := len(prev); n > 0 {
+		item.ContextBefore = tailRunes(prev[n-1].Content, contextSnippetRunes)
+	}
+	if len(next) > 0 {
+		item.ContextAfter = headRunes(next[0].Content, contextSnippetRunes)
+	}
 	return item
+}
+
+// headRunes / tailRunes 按 **rune** 截断，不是按字节。
+//
+// 按字节截会把汉字切成半个、输出乱码——这是中文场景下最容易踩的语言级
+// 问题，而它不会报错，只是结果看起来像乱码。
+func headRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+func tailRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-n:])
 }
