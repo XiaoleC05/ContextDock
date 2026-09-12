@@ -40,6 +40,9 @@ ContextDock 是一个**本机运行**的 MCP Server。它把文档切分成片�
 > 这是一张**静态图**（不是录屏），由 `go run ./cmd/demo` 生成，内容为真实运行输出、
 > 未经改写，每个数字都能用[测试](#测试)一节里的命令复现。
 > 注意上半用的是**真实嵌入**——CI 的质量门禁跑的是假嵌入，数字不同，两者不能混着比。
+>
+> 图上的数字是**生成那一天**的快照。改了检索、切分或评测参数之后要重跑
+> `go run ./cmd/demo`；忘了的话 `go run ./cmd/demo -check` 会告诉你它已经过期了。
 
 ## 目录
 
@@ -109,6 +112,21 @@ go build -o bin/contextdock ./cmd/contextdock
 ```
 
 > 后面的示例统一用 Windows 的 `.exe` 路径，其他平台换成 `bin/contextdock` 即可。
+
+### 不想 clone？用 `go install`
+
+```bash
+go install github.com/XiaoleC05/ContextDock/cmd/contextdock@latest
+```
+
+装到 `$(go env GOPATH)/bin/contextdock`。三点要注意：
+
+- **装的是最新 tag，不是 `main`**。想知道自己装到了哪个版本：`go version -m $(which contextdock)`
+- ⚠️ **配置从「当前工作目录」找**。二进制不在仓库里了，`.env` 也就不在它旁边了。
+  而 MCP server 的工作目录由 Agent 决定，**不是**你敲命令时所在的那个目录。
+  所以这条路**务必用环境变量而不是 `.env`**——写进下面第 3 步的 `env` 块里
+- 受限网络下可能连不上校验数据库（`sum.golang.org`），报 `verifying module: ... 404`。
+  那不是模块的问题，加 `GOFLAGS=-mod=mod GOSUMDB=off` 重试
 
 ### 只想先跑跑看？到这里就够了
 
@@ -342,12 +360,24 @@ go test -bench . -benchmem ./...   # 性能基准
 
 ### 集成测试（需要数据库）
 
+⚠️ **必须显式指定一个专用库**。这些测试每个都会 `TRUNCATE`，
+所以它们**不会**默认连开发库——不设 `CONTEXTDOCK_TEST_DSN` 时整个包会被跳过。
+
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
-go test -v -tags=integration ./internal/store/
+
+# 建一个专用库并应用迁移
+docker exec contextdock-pg psql -U postgres -c "CREATE DATABASE contextdock_test"
+for f in migrations/*.sql; do
+    docker exec -i contextdock-pg psql -v ON_ERROR_STOP=1 -U postgres -d contextdock_test < "$f"
+done
+
+CONTEXTDOCK_TEST_DSN="postgres://postgres:postgres@localhost:5432/contextdock_test?sslmode=disable" \
+    go test -v -tags=integration ./internal/store/
 ```
 
-覆盖真实数据库的往返、向量读写、级联删除、事务回滚，以及**重启后从库重建索引**。
+覆盖真实数据库的往返、向量读写、级联删除、事务回滚、**重启后从库重建索引**，
+以及向量检索的**执行计划**（确认它真的能走 HNSW 索引，而不是退化成全表扫描）。
 
 ### 端到端冒烟测试
 
@@ -459,7 +489,9 @@ go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
   BM25 索引仍会把全部片段（含向量）读进来。省掉这份内存是 #70 的事
 - **BM25 是内存索引**，每次启动从数据库全量重建，大文档库下启动会变慢
 - **切分参数测不出优劣**（400 字 / 60 字重叠）：20 组参数（MaxRunes × Overlap）跑下来，
-  融合 recall 跨度 0.628~0.767（在当时的默认候选倍数 3 下测的），
+  融合 recall 跨度 0.628~0.767（**43 条查询**上的平均、当时的默认候选倍数 3 下测的。
+  ⚠️ `go run ./cmd/eval` 现在打印的「总计」是 **51 条**——多了 8 条无答案对照组，
+  同一个成绩会被摊薄。两个口径都对，但**不能直接比**），
   **恰好落在噪声范围内**（一条查询值 2 个百分点、标准误约 0.07）。
   所以**维持原样**——不是「实测最优」，是「测不出差别就不动」。
   ⚠️ 但**成本侧的差别是实打实的**：切得最碎的配置索引是最大的 3.3 倍。
