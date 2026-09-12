@@ -59,12 +59,9 @@ func run() error {
 	log.Printf("配置: %s", cfg)
 
 	// ---- 2. Embedder ----
-	embedder, err := embed.NewSiliconFlow(cfg.SiliconFlowAPIKey,
-		embed.WithBaseURL(cfg.SiliconFlowBaseURL),
-		embed.WithModel(cfg.EmbeddingModel),
-	)
+	embedder, err := buildEmbedder(cfg)
 	if err != nil {
-		return fmt.Errorf("创建 Embedder 失败: %w", err)
+		return err
 	}
 
 	// ---- 3. Store ----
@@ -115,6 +112,37 @@ func run() error {
 
 	log.Printf("正常退出")
 	return nil
+}
+
+// buildEmbedder 根据配置选择 Embedder 实现。
+//
+// 假嵌入（CONTEXTDOCK_FAKE_EMBEDDER=true）让任何人 clone 完就能跑通
+// 「导入 → 检索」全链路：不用 API Key、不联网、不起数据库
+// （再配上 CONTEXTDOCK_USE_MEMORY_STORE=true）。
+//
+// ⚠️ 它按 token 哈希造向量，只有「共享词越多越像」这一层粗粒度相似性，
+// **没有任何语义理解**——问「怎么让程序跑得快」，它找不到写着「性能优化」
+// 的段落，而那正是混合检索存在的理由。所以它验证的是**链路通不通**，
+// 不是检索好不好。要判断质量请用 cmd/eval，要真实效果请配真 Key。
+//
+// 这条路径唯一的用途是降低陌生人的进入成本，因此每次启动都要
+// 把上面这句话打到 stderr 上——默认路径的校验一点没放松。
+func buildEmbedder(cfg *config.Config) (embed.Embedder, error) {
+	if cfg.FakeEmbedder {
+		log.Printf("⚠️  假嵌入已开启（%s=true）：不联网、不校验 API Key。"+
+			"向量由 token 哈希生成，**没有语义理解**，检索质量无意义——"+
+			"它只用来验证链路是否跑通", config.EnvFakeEmbedder)
+		return embed.NewFake(), nil
+	}
+
+	embedder, err := embed.NewSiliconFlow(cfg.SiliconFlowAPIKey,
+		embed.WithBaseURL(cfg.SiliconFlowBaseURL),
+		embed.WithModel(cfg.EmbeddingModel),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 Embedder 失败: %w", err)
+	}
+	return embedder, nil
 }
 
 // buildStore 根据配置选择存储实现。

@@ -42,6 +42,55 @@ func longText(n int) string {
 	return strings.Repeat("这是一段用于测试混合检索的中文内容。", n)
 }
 
+// closeErrStore 包一层 Store，只覆盖 Close，用来验证关停路径的错误传播。
+//
+// 内嵌接口而不是实现全部方法：Store 有十来个方法，
+// 为了测其中一个就把其余都写成 panic 桩，只会让这个测试本身变成负担。
+type closeErrStore struct {
+	store.Store
+	err error
+}
+
+func (s closeErrStore) Close() error { return s.err }
+
+// TestServiceClosePropagatesStoreError 验证关停失败不会被吞掉。
+//
+// main.go 是在 defer 里调 Service.Close() 的，而且**只在出错时打一行日志**。
+// 也就是说：如果这里把错误吞掉，进程退出码仍然是 0，
+// 「关停时连接池没关干净」就变成一个没有任何信号的谜。
+func TestServiceClosePropagatesStoreError(t *testing.T) {
+	wantErr := errors.New("模拟关停失败")
+	st := closeErrStore{Store: store.NewMemory(), err: wantErr}
+
+	svc, err := New(testConfig(), embed.NewFake(), st)
+	if err != nil {
+		t.Fatalf("创建服务失败: %v", err)
+	}
+
+	if err := svc.Close(); !errors.Is(err, wantErr) {
+		t.Errorf("Service.Close() 应把存储的错误原样传出，实际 %v", err)
+	}
+}
+
+// TestServiceCloseOnMemoryStore 验证内存存储的关停是安全且可重复的。
+//
+// 它没有资源要释放，本身是 `return nil`；但这条链路值得测，有两个原因：
+//
+//  1. 它是 main.go 里那条 defer 的**唯一终点**，没有测试就只能靠读代码确认
+//  2. 重复关闭**真的会发生**：main.go 既 defer 了 st.Close()，
+//     又 defer 了 svc.Close()，而后者内部又调一次 st.Close()。
+//     单进程里同一个 store 会被关两次。
+func TestServiceCloseOnMemoryStore(t *testing.T) {
+	svc, _ := newTestService(t, nil)
+
+	if err := svc.Close(); err != nil {
+		t.Errorf("内存存储关停不应报错，实际 %v", err)
+	}
+	if err := svc.Close(); err != nil {
+		t.Errorf("重复关停不应报错，实际 %v", err)
+	}
+}
+
 func TestServiceRebuildEmpty(t *testing.T) {
 	svc, _ := newTestService(t, nil)
 

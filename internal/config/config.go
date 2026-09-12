@@ -36,6 +36,11 @@ const (
 
 	// EnvMergeAdjacent 控制相邻片段合并（#50）。
 	EnvMergeAdjacent = "CONTEXTDOCK_MERGE_ADJACENT"
+
+	// EnvFakeEmbedder 打开假嵌入，用于「clone 完就能跑」的演示路径。
+	//
+	// 它同时**豁免** EnvSiliconFlowAPIKey 这条必填校验——假嵌入不联网。
+	EnvFakeEmbedder = "CONTEXTDOCK_FAKE_EMBEDDER"
 )
 
 // 默认值。
@@ -88,6 +93,14 @@ type Config struct {
 	SiliconFlowAPIKey  string
 	SiliconFlowBaseURL string
 	EmbeddingModel     string
+
+	// FakeEmbedder 为真时用 token 哈希造的假向量替代真实 Embedding 调用。
+	//
+	// ⚠️ **不是降级方案，是演示/开发开关**。它不联网、不要 API Key、
+	// 完全确定，能让任何人 clone 完就跑通「导入 → 检索」全链路；
+	// 代价是**没有任何语义理解**——只有"共享词越多越像"的粗粒度相似性。
+	// 所以它验证的是链路通不通，不是检索好不好。
+	FakeEmbedder bool
 
 	// 存储
 	UseMemoryStore bool
@@ -166,16 +179,40 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		EmbeddingDim:       types.EmbeddingDim,
 	}
 
+	// ---- 假嵌入开关 ----
+	//
+	// ⚠️ 必须**先于** API Key 的校验读出来：它决定 API Key 还算不算必填。
+	if v, ok := getenv(EnvFakeEmbedder); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s=%q 不是合法的布尔值",
+				ErrBadValue, EnvFakeEmbedder, v)
+		}
+		cfg.FakeEmbedder = b
+	}
+
 	// ---- 必填 ----
-	key, ok := getenv(EnvSiliconFlowAPIKey)
-	if !ok {
-		return nil, ErrMissingAPIKey
+	//
+	// API Key 只在**真实嵌入**下必填。开了假嵌入就不联网了，
+	// 再要求一个 Key 只会挡住「clone 完想先跑跑看」的人。
+	//
+	// ⚠️ 但默认路径的校验一点没放松：没开这个开关时，
+	// Key 缺失或为空仍然是启动期硬失败。
+	if !cfg.FakeEmbedder {
+		key, ok := getenv(EnvSiliconFlowAPIKey)
+		if !ok {
+			return nil, ErrMissingAPIKey
+		}
+		if strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("%w: %s 存在但为空，请填入真实的 API Key",
+				ErrMissingAPIKey, EnvSiliconFlowAPIKey)
+		}
+		cfg.SiliconFlowAPIKey = strings.TrimSpace(key)
+	} else if key, ok := getenv(EnvSiliconFlowAPIKey); ok {
+		// 开了假嵌入但 Key 也在：留着，String() 会打码显示"已设置"，
+		// 便于确认自己没配错。它不会被使用。
+		cfg.SiliconFlowAPIKey = strings.TrimSpace(key)
 	}
-	if strings.TrimSpace(key) == "" {
-		return nil, fmt.Errorf("%w: %s 存在但为空，请填入真实的 API Key",
-			ErrMissingAPIKey, EnvSiliconFlowAPIKey)
-	}
-	cfg.SiliconFlowAPIKey = strings.TrimSpace(key)
 
 	// ---- 可选，带默认值 ----
 	if v, ok := getenv(EnvSiliconFlowBase); ok {
@@ -293,9 +330,10 @@ func (c *Config) Validate() error {
 // 一个 log.Printf("%+v", cfg) 就会把密钥写进日志文件。
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{model:%s baseURL:%s apiKey:%s db:%s memoryStore:%v topK:%d timeout:%v "+
-			"chunk:%d/%d poolMaxConns:%d}",
-		c.EmbeddingModel, c.SiliconFlowBaseURL, maskSecret(c.SiliconFlowAPIKey),
+		"Config{model:%s baseURL:%s fakeEmbedder:%v apiKey:%s db:%s memoryStore:%v "+
+			"topK:%d timeout:%v chunk:%d/%d poolMaxConns:%d}",
+		c.EmbeddingModel, c.SiliconFlowBaseURL, c.FakeEmbedder,
+		maskSecret(c.SiliconFlowAPIKey),
 		maskSecret(c.DatabaseURL), c.UseMemoryStore, c.TopK, c.SearchTimeout,
 		c.ChunkMaxRunes, c.ChunkOverlap, c.PoolMaxConns)
 }

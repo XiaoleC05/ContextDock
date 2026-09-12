@@ -32,6 +32,15 @@
 ContextDock 是一个**本机运行**的 MCP Server。它把文档切分成片段、生成向量、存进 PostgreSQL，
 在 Agent 提问时用「关键词检索 + 向量检索 + RRF 融合」找出最相关的片段返回。
 
+上面那张图是它的两副面孔：**一把尺子**（上半，评测器打出的真实 recall 表）和
+**一次真实检索**（下半，接上 Agent 之后真正会拿到的东西）。
+
+![ContextDock 演示：各通道检索成绩与一次真实检索](docs/demo.svg)
+
+> 这是一张**静态图**（不是录屏），由 `go run ./cmd/demo` 生成，内容为真实运行输出、
+> 未经改写，每个数字都能用[测试](#测试)一节里的命令复现。
+> 注意上半用的是**真实嵌入**——CI 的质量门禁跑的是假嵌入，数字不同，两者不能混着比。
+
 ## 目录
 
 - [这是什么](#这是什么)
@@ -85,7 +94,7 @@ ContextDock 站在 Agent 和你的文档之间，干两件事：
 
 ## 快速开始
 
-**前置**：Go ≥ 1.25、Docker Desktop（启用 Linux 容器模式）。
+**前置**：Go ≥ 1.26.4（以 [`go.mod`](go.mod) 为准）、Docker Desktop（启用 Linux 容器模式）。
 
 ### 1. 构建
 
@@ -100,6 +109,27 @@ go build -o bin/contextdock ./cmd/contextdock
 ```
 
 > 后面的示例统一用 Windows 的 `.exe` 路径，其他平台换成 `bin/contextdock` 即可。
+
+### 只想先跑跑看？到这里就够了
+
+上一步构建完之后，用**假嵌入**跑一遍自带的端到端冒烟测试——
+不需要 API Key，不需要数据库，不联网：
+
+```bash
+# Windows（其他平台把路径换成 bin/contextdock）
+CONTEXTDOCK_FAKE_EMBEDDER=true CONTEXTDOCK_USE_MEMORY_STORE=true go run ./cmd/smoke
+```
+
+它会把二进制**当 MCP server 真的跑起来**，用 stdio 发 JSON-RPC，走完
+握手 → 工具发现 → 导入 → 检索，并把每一步的结果打出来。想自己接 Agent 试，
+把上面两个环境变量填进 [第 3 步](#3-接到-agent)的 `env` 块即可。
+
+> ⚠️ **假嵌入没有语义理解**。它按 token 哈希现造向量，只有「共享词越多越像」
+> 这一层粗粒度相似性——问「怎么让程序跑得快」，它找不到写着「性能优化」的段落，
+> 而那正是混合检索存在的理由。
+>
+> 所以它验证的是**链路通不通**，不是检索好不好。要判断质量用
+> `go run ./cmd/eval`（见[测试](#测试)），要真实效果得配真 Key 走下面的步骤。
 
 ### 2. 起数据库、填 API Key
 
@@ -210,6 +240,7 @@ docker exec -i contextdock-pg psql -U postgres -d contextdock \
 | `SILICONFLOW_BASE_URL` | `https://api.siliconflow.cn/v1` | Embedding 接口地址 |
 | `CONTEXTDOCK_EMBEDDING_MODEL` | `Pro/BAAI/bge-m3` | 模型名。⚠️ 换模型必须同时改维度，见下 |
 | `CONTEXTDOCK_USE_MEMORY_STORE` | `false` | 置 `true` 走内存存储，**不需要数据库**（测试用） |
+| `CONTEXTDOCK_FAKE_EMBEDDER` | `false` | 置 `true` 用假嵌入：不联网、**不要求 API Key**。⚠️ 没有语义理解，只用于跑通链路 |
 | `CONTEXTDOCK_TOP_K` | `10` | 检索默认返回条数 |
 | `CONTEXTDOCK_SEARCH_TIMEOUT` | `5s` | 单次检索超时 |
 | `CONTEXTDOCK_CHUNK_MAX_RUNES` | `400` | 单个片段的最大**字符**数（不是字节） |
@@ -290,6 +321,24 @@ go test -cover ./...           # 覆盖率
 go test -race ./...            # 竞态检测（需要 C 编译器）
 go test -bench . -benchmem ./...   # 性能基准
 ```
+
+> ⚠️ **覆盖率的数字要看口径**。默认的 `-cover` 是**按包**统计，`internal/store`
+> 会显示 31.6%，读起来像「最接近生产的代码测得最少」——但这里面混了两件事：
+>
+> - `postgres.go` 整个文件 0%：它的测试在 `//go:build integration` 后面，
+>   默认命令**根本不编译**。代码是被测过的，只是要跑[集成测试](#集成测试需要数据库)才看得见
+> - `memory.go` 的若干函数 0%：它们的测试在 `internal/ingest`，
+>   包内统计自然算不到
+>
+> 换跨包口径能看出区别：
+>
+> ```bash
+> go test -coverpkg=./internal/store -cover ./internal/...
+> ```
+>
+> 顺带一提，这个数字**曾经真的漏掉过一个缺口**：`Memory.Close()` 是
+> `main.go` 里 `defer svc.Close()` 的终点，换口径后仍然是 0.0%——
+> 整条关停路径一条测试都没有。现在补上了。
 
 ### 集成测试（需要数据库）
 
