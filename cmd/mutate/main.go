@@ -463,6 +463,63 @@ var mutations = []mutation{
 		new:  `e.Grade = GradePartial`,
 	},
 
+	// ---- 相邻片段合并（#50）----
+	{
+		// 序号不相邻也合并：会把"中间没被命中的内容"一并包进来，
+		// 造出一段原文里并不连续的正文。
+		name: "merge: 序号不相邻也合并",
+		file: "internal/retrieve/merge.go",
+		old:  `results[idxs[j]].Chunk.Ordinal == results[idxs[j-1]].Chunk.Ordinal+1`,
+		new:  `results[idxs[j]].Chunk.Ordinal == results[idxs[j-1]].Chunk.Ordinal`,
+	},
+	{
+		// 合并后取序号最小的那条当代表，而不是名次最好的那条：
+		// 合并结果整体后移，把本可以露出的别的文档又挤回去。
+		name: "merge: 代表取序号最小而非名次最好",
+		file: "internal/retrieve/merge.go",
+		old: `if k < head {
+					head = k
+				}`,
+		new: `if false {
+					head = k
+				}`,
+	},
+	{
+		// 拼接时不去掉重叠：正文里会出现重复段落，
+		// 而且它不再等于原文的 [start,end)——那条不变量一破，
+		// 上下文扩展和「重新切分对齐」都会错位。
+		name: "merge: 拼接正文时不去掉重叠",
+		file: "internal/retrieve/merge.go",
+		old:  `skip := prevEnd - c.StartOffset`,
+		new:  `skip := 0`,
+	},
+	{
+		// 不按文档分组：不同文档的片段也会被合并，
+		// 造出一段横跨两份文档、原文里根本不存在的正文。
+		//
+		// 用 Chunk.ID 代替 DocumentID：在测试里片段 ID 都没设（全是 0），
+		// 于是所有结果落进同一组、跨文档合并真的会发生。
+		name: "merge: 跨文档合并",
+		file: "internal/retrieve/merge.go",
+		old:  `groups[r.Chunk.DocumentID] = append(groups[r.Chunk.DocumentID], i)`,
+		new:  `groups[r.Chunk.ID] = append(groups[r.Chunk.ID], i)`,
+	},
+	{
+		// ⚠️ 这条对应一个**真实踩过的坑**：为了让合并有截断空间而给
+		// Search 传更大的 topK，会连带放大每路的候选数，改变 RRF 排名。
+		// 实测 recall 掉 7 个百分点。
+		name: "hybrid: SearchAll 也截断（合并失去腾挪空间）",
+		file: "internal/retrieve/hybrid.go",
+		old:  `	return h.search(ctx, query, queryVec, topK, false)`,
+		new:  `	return h.search(ctx, query, queryVec, topK, true)`,
+	},
+	{
+		name: "hybrid: 不截断时仍按 topK 融合",
+		file: "internal/retrieve/hybrid.go",
+		old:  `		fuseK = 0 // FuseRRF 的 0 表示不截断`,
+		new:  `		fuseK = topK`,
+	},
+
 	// ---- 上下文扩展（#49）----
 	{
 		// 前一段取头部：给 Agent 看一段它根本接不上的话，比不给还糟。

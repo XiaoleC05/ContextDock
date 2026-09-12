@@ -107,6 +107,25 @@ func (s *Service) SearchChannels(ctx context.Context, query string, topK, rrfK, 
 		hybrid = hybrid.WithCandidateMultiplier(mult)
 	}
 
+	// 开了相邻片段合并时，融合**不截断**：合并完再截断。
+	//
+	// ⚠️ 不能用「传一个更大的 topK」来代替——那会让每路取回的候选数
+	// 跟着变大，而 RRF 的排名依赖候选池大小，算出来的名次和原来对不上。
+	// 实测那样做会让 recall 掉 7 个百分点。见 Hybrid.SearchAll 的说明。
+	if s.cfg.MergeAdjacent {
+		fused, err := hybrid.SearchAll(ctx, query, queryVec, topK)
+		if err != nil {
+			return nil, fmt.Errorf("service: 混合检索失败: %w", err)
+		}
+		// 合并只删冗余、不动顺序，所以原 topK 名里属于各组的代表一条都不会丢；
+		// 腾出来的位置由**同一份排名**里更深的名次填上。
+		out.Fused = retrieve.MergeAdjacent(fused)
+		if len(out.Fused) > topK {
+			out.Fused = out.Fused[:topK]
+		}
+		return out, nil
+	}
+
 	if out.Fused, err = hybrid.Search(ctx, query, queryVec, topK); err != nil {
 		return nil, fmt.Errorf("service: 混合检索失败: %w", err)
 	}

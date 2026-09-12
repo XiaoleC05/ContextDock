@@ -139,9 +139,39 @@ func (h *Hybrid) WithErrorHandler(fn func(types.Retriever, error)) *Hybrid {
 //
 // topK <= 0 时使用 defaultTopK。
 func (h *Hybrid) Search(ctx context.Context, query string, queryVec []float32, topK int) ([]types.SearchResult, error) {
+	return h.search(ctx, query, queryVec, topK, true)
+}
+
+// SearchAll 与 Search 完全相同，但**不截断**融合结果。
+//
+// # 什么时候需要它
+//
+// 调用方要在融合之后再加工（比如 #50 的相邻片段合并），加工完才截断。
+//
+// # ⚠️ 不要用「传一个更大的 topK」来达到同样目的
+//
+// 那个做法看起来等价，实际上**会改变排名**：每路取回的候选数
+// `n = topK * mult` 会跟着变大，而 RRF 的排名**依赖候选池大小**——
+// 候选一多，弱通道的噪声就能压过强通道的相关结果（这正是 #44 测出来的）。
+//
+// 实测后果：开了相邻片段合并之后 recall 从 0.837 掉到 0.767，
+// 而 top-10 里换掉的是一整批不相干的结果，不是"少了几条冗余"。
+func (h *Hybrid) SearchAll(ctx context.Context, query string, queryVec []float32, topK int) ([]types.SearchResult, error) {
+	return h.search(ctx, query, queryVec, topK, false)
+}
+
+// search 是 Search / SearchAll 的共同实现。
+//
+// topK 决定**每路取多少候选**（n = topK * mult），truncate 决定
+// 融合结果要不要截断到 topK。两者分开，是因为它们的含义完全不同。
+func (h *Hybrid) search(ctx context.Context, query string, queryVec []float32, topK int, truncate bool) ([]types.SearchResult, error) {
 	const defaultTopK = 10
 	if topK <= 0 {
 		topK = defaultTopK
+	}
+	fuseK := topK
+	if !truncate {
+		fuseK = 0 // FuseRRF 的 0 表示不截断
 	}
 	n := topK * h.mult
 
@@ -193,14 +223,14 @@ func (h *Hybrid) Search(ctx context.Context, query string, queryVec []float32, t
 			if len(runs) == 0 {
 				return nil, ctx.Err()
 			}
-			return FuseRRF(h.k, topK, runs...), nil
+			return FuseRRF(h.k, fuseK, runs...), nil
 		}
 	}
 
 	if len(runs) == 0 {
 		return nil, fmt.Errorf("%w: %v", ErrBothRetrieversFailed, errors.Join(errs...))
 	}
-	return FuseRRF(h.k, topK, runs...), nil
+	return FuseRRF(h.k, fuseK, runs...), nil
 }
 
 func (h *Hybrid) reportError(r types.Retriever, err error) {

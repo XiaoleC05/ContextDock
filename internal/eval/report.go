@@ -47,6 +47,18 @@ func WriteTable(w io.Writer, rep *Report) error {
 	writeGainTable(w, rep)
 	fmt.Fprintln(w)
 
+	// ---- top-k 覆盖的文档数 ----
+	if len(rep.DistinctDocs) > 0 {
+		fmt.Fprintln(w, "top-k 平均覆盖的不同文档数：")
+		head := []string{"通道", "文档数"}
+		rows := [][]string{}
+		for _, ch := range AllChannels {
+			rows = append(rows, []string{string(ch), fmt.Sprintf("%.2f", rep.DistinctDocs[ch])})
+		}
+		writeAligned(w, head, rows, 1)
+		fmt.Fprintln(w)
+	}
+
 	// ---- 上下文扩展的收益（#49）----
 	if len(rep.ExpandedRecall) > 0 {
 		fmt.Fprintln(w, "上下文扩展（每条结果带出相邻片段后）的召回：")

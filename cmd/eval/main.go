@@ -57,6 +57,8 @@ func run() error {
 
 		tokenizeScheme = flag.String("tokenize", "", "CJK 分词方案：bigram / unigram / both（默认 bigram）")
 		contextN       = flag.Int("context", 0, "上下文扩展：每条结果带出前后各几段（#49），0 = 关")
+		// 三态：默认跟生产默认走，显式传 -merge=false 才能关。
+		mergeAdj = flag.Bool("merge", config.DefaultMergeAdjacent, "相邻片段合并（#50）")
 
 		asJSON = flag.Bool("json", false, "输出机读 JSON 而不是表格")
 		detail = flag.Bool("detail", false, "报告里带上逐条查询明细（供失败分析）")
@@ -111,6 +113,7 @@ func run() error {
 		MaxRunes: *maxRunes, Overlap: *overlap, NDCGK: *ndcgK,
 		TokenizeScheme:   tokenize.Scheme(*tokenizeScheme),
 		ContextNeighbors: *contextN,
+		MergeAdjacent:    mergeAdj,
 		KeepDetail:       *detail || *asJSON,
 	}
 	if *overlap >= 0 {

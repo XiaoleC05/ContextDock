@@ -159,6 +159,7 @@ docker exec -i contextdock-pg psql -U postgres -d contextdock \
 - **两套存储实现**：内存版用于测试和 benchmark，pgvector 版用于持久化——检索核心不依赖数据库
 - **可测的检索核心**：`FakeEmbedder` 不访问网络，BM25 与向量检索都能在纯内存里跑测试
 - **逐级降级**：嵌入接口挂了不会让检索整个失败，关键词检索仍然顶上，并在结果里标注降级原因
+- **相邻片段合并**：同一处内容连着命中好几条时合并成一条，让 top-k 覆盖到更多文档
 - **MCP stdio 接入**：两个工具 `import_document` / `search_knowledge_base`
 
 ---
@@ -204,6 +205,7 @@ docker exec -i contextdock-pg psql -U postgres -d contextdock \
 | `CONTEXTDOCK_CHUNK_OVERLAP` | `60` | 相邻片段的重叠字符数 |
 | `CONTEXTDOCK_POOL_MAX_CONNS` | `8` | 数据库连接池上限 |
 | `CONTEXTDOCK_CONTEXT_NEIGHBORS` | `1` | 每条结果带出前后各几段相邻片段的**摘要**（0 = 关） |
+| `CONTEXTDOCK_MERGE_ADJACENT` | `true` | 把同一文档里序号连续的命中合并成一条，腾出结果位给别的文档 |
 
 > ⚠️ **换 Embedding 模型要三处同改**：模型名、`types.EmbeddingDim` 常量、建表语句的
 > `vector(1024)`，然后重建表和索引、重灌全量向量。这是全项目最贵的一次改动。

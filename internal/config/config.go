@@ -33,6 +33,9 @@ const (
 
 	// EnvContextNeighbors 控制上下文扩展：每条结果带出前后各几段（#49）。
 	EnvContextNeighbors = "CONTEXTDOCK_CONTEXT_NEIGHBORS"
+
+	// EnvMergeAdjacent 控制相邻片段合并（#50）。
+	EnvMergeAdjacent = "CONTEXTDOCK_MERGE_ADJACENT"
 )
 
 // 默认值。
@@ -56,6 +59,16 @@ const (
 	//
 	// 上限由输出体积决定，不由"能带几段"决定——见 mcp 包里的截断说明。
 	DefaultContextNeighbors = 1
+
+	// DefaultMergeAdjacent 是相邻片段合并的默认开关。
+	//
+	// 默认**开**，依据是实测（四组切分参数，见 BENCHMARKS.md）：
+	// recall 两平两升、无一下降，NDCG@10 全部提升 0.05~0.09，
+	// top-k 覆盖的不同文档数从 3.3~3.6 升到 3.6~3.95。
+	//
+	// 它解决的问题是「top-10 里三四条都是同一处内容，别的文档挤不进来」，
+	// 而那个问题光看 recall 是看不出来的。
+	DefaultMergeAdjacent = true
 )
 
 var (
@@ -92,6 +105,11 @@ type Config struct {
 	// ContextNeighbors 是每条检索结果带出的相邻片段数（前后各这么多段），
 	// 0 表示不做上下文扩展。
 	ContextNeighbors int
+
+	// MergeAdjacent 为真时，把同一文档里序号连续的命中合并成一条（#50）。
+	//
+	// 目的是腾出结果位：同一处内容占掉三四条时，别的文档就挤不进来了。
+	MergeAdjacent bool
 
 	// 分词方案（CJK 部分）。
 	//
@@ -143,6 +161,7 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		ChunkOverlap:       DefaultChunkOverlap,
 		TokenizeScheme:     tokenize.SchemeBigram,
 		ContextNeighbors:   DefaultContextNeighbors,
+		MergeAdjacent:      DefaultMergeAdjacent,
 		PoolMaxConns:       DefaultPoolMaxConns,
 		EmbeddingDim:       types.EmbeddingDim,
 	}
@@ -167,6 +186,15 @@ func LoadWith(getenv Getenv) (*Config, error) {
 	}
 	if v, ok := getenv(EnvDatabaseURL); ok {
 		cfg.DatabaseURL = v
+	}
+
+	if v, ok := getenv(EnvMergeAdjacent); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s=%q 不是合法的布尔值",
+				ErrBadValue, EnvMergeAdjacent, v)
+		}
+		cfg.MergeAdjacent = b
 	}
 
 	if v, ok := getenv(EnvUseMemoryStore); ok {

@@ -65,6 +65,13 @@ type Options struct {
 	// > 0 时报告里会多出一列 ExpandedRecall，用来量化答案完整性的提升。
 	ContextNeighbors int `json:"context_neighbors,omitempty"`
 
+	// MergeAdjacent 打开相邻片段合并（#50）。
+	//
+	// ⚠️ 默认值必须**和 config.DefaultMergeAdjacent 一致**——
+	// 基线要跑在线上真正会跑的配置上，否则后面所有对比都是在
+	// 和一个不存在的配置比。这个坑在候选倍数上踩过一次（见 #44）。
+	MergeAdjacent *bool `json:"merge_adjacent,omitempty"`
+
 	// KeepDetail 为真时在报告里保留逐条查询的明细。
 	KeepDetail bool `json:"-"`
 }
@@ -126,6 +133,10 @@ func (o Options) Normalize() Options {
 	}
 	if !o.TokenizeScheme.Valid() {
 		o.TokenizeScheme = tokenize.SchemeBigram
+	}
+	if o.MergeAdjacent == nil {
+		v := config.DefaultMergeAdjacent
+		o.MergeAdjacent = &v
 	}
 	return o
 }
@@ -246,6 +257,13 @@ type Report struct {
 	// 只会让指标变成数字游戏。
 	ExpandedRecall map[Channel]float64 `json:"expanded_recall,omitempty"`
 
+	// DistinctDocs 是 top-k 里**平均覆盖多少个不同文档**，按通道分。
+	//
+	// 相邻片段合并（#50）的目标就是把它提上去：同一处内容占掉三四条时，
+	// 别的文档挤不进来。只看 recall 看不出这个问题——它不关心结果
+	// 是不是全都来自同一篇。
+	DistinctDocs map[Channel]float64 `json:"distinct_docs,omitempty"`
+
 	// Detail 是逐条明细，Options.KeepDetail 为真时才有内容。
 	Detail []QueryDetail `json:"detail,omitempty"`
 }
@@ -291,6 +309,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		PoolMaxConns:   8,
 		EmbeddingDim:   types.EmbeddingDim,
 		TokenizeScheme: opt.TokenizeScheme,
+		MergeAdjacent:  *opt.MergeAdjacent,
 	}
 	svc, err := service.New(cfg, emb, store.NewMemory())
 	if err != nil {
@@ -359,6 +378,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 	// 上下文扩展后的召回累计（#49）。相邻片段没有名次，
 	// 所以只累加召回率，不碰 MRR / NDCG。
 	expandedSum := make(map[Channel]float64, len(AllChannels))
+	distinctSum := make(map[Channel]float64, len(AllChannels))
 
 	// 每次检索的耗时，跑完查询后算分位数。
 	// 预分配到查询总数，避免在计时循环里触发扩容——
@@ -402,6 +422,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 				}
 				sc := Score(q.Expect, results, opt.NDCGK)
 				detail.ByChannel[ch] = sc
+				distinctSum[ch] += float64(countDocuments(results))
 
 				if opt.ContextNeighbors > 0 {
 					// 把每条结果的相邻片段也放进候选集，重新算一次召回。
@@ -450,6 +471,14 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		rep.ExpandedRecall = make(map[Channel]float64, len(AllChannels))
 		for _, ch := range AllChannels {
 			rep.ExpandedRecall[ch] = expandedSum[ch] / float64(rep.Overall[ch].Queries)
+		}
+	}
+
+	if len(rep.Overall) > 0 {
+		n := float64(rep.Overall[ChannelFused].Queries)
+		rep.DistinctDocs = make(map[Channel]float64, len(AllChannels))
+		for _, ch := range AllChannels {
+			rep.DistinctDocs[ch] = distinctSum[ch] / n
 		}
 	}
 
@@ -528,4 +557,16 @@ func expandWithNeighbors(svc *service.Service, results []types.SearchResult, n i
 		}
 	}
 	return out
+}
+
+// countDocuments 数一组结果来自多少个不同的文档。
+//
+// 用 source 而不是 DocumentID：评测里每份语料是一篇文档，
+// 而 source 正是「这段内容出自哪份语料」那个标签。
+func countDocuments(results []types.SearchResult) int {
+	seen := make(map[string]struct{}, len(results))
+	for _, r := range results {
+		seen[r.Chunk.Metadata[types.MetadataKeySource]] = struct{}{}
+	}
+	return len(seen)
 }
