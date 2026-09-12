@@ -698,3 +698,79 @@ func TestChunkAlwaysAdvances(t *testing.T) {
 		}
 	}
 }
+
+// ---- 重叠起点吸附行边界（#48）----
+
+// ---- 重叠起点（#48：试过行边界吸附，实测有害，已回退）----
+//
+// 这里**故意没有**「片段必须从行首开始」这条断言。理由写在 chunker.go
+// 的对应位置和 BENCHMARKS.md 里：两种吸附方向各跑 4 组切分参数，
+// 没有一次比「盲退固定字符数」更好。
+//
+// 顺手记下这条**已知限制**：片段确实可能从半行开始
+// （实测能见到以 "───────────┘" 开头的片段）。
+// 它是可读性问题，不影响答案能不能被取到——而修它的两种尝试都伤了召回。
+
+// TestOverlapNeverExceedsConfigured 守护「实际重叠不长于配置值」。
+//
+// 吸附的方向必须是**向后**（朝文末）找行首。向前找会让重叠比配置值更长，
+// 而 OverlapRunes 这个数是按索引成本定下来的——重叠悄悄变长意味着
+// 索引体积悄悄膨胀，报告上看不出来。
+func TestOverlapNeverExceedsConfigured(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 80; i++ {
+		b.WriteString("这一段有内容。\n")
+	}
+	content := b.String()
+
+	const overlap = 25
+	c := newChunker(t, Config{MaxRunes: 90, OverlapRunes: overlap})
+	chunks := mustSplit(t, c, 1, content)
+
+	for i := 0; i+1 < len(chunks); i++ {
+		got := chunks[i].EndOffset - chunks[i+1].StartOffset
+		if got > overlap {
+			t.Errorf("片段 %d → %d 的实际重叠 %d 超过配置的 %d",
+				i, i+1, got, overlap)
+		}
+	}
+}
+
+// TestOverlapOnSingleLongLine 守护「没有换行的超长文本照样切得动」。
+//
+// 整篇只有一行时，任何按行对齐的设想都无从谈起。这时不能硬猜位置，
+// 只能按固定字符数回退——片段会从半行开始，但那是物理上无法避免的，
+// 关键是不丢内容、不死循环。
+func TestOverlapOnSingleLongLine(t *testing.T) {
+	// 无换行的长文本：整篇只有一行。
+	content := strings.Repeat("没有任何换行的超长文本内容", 40)
+
+	c := newChunker(t, Config{MaxRunes: 100, OverlapRunes: 30})
+	chunks := mustSplit(t, c, 1, content)
+
+	if len(chunks) < 5 {
+		t.Fatalf("应当切出多段，实际 %d 段", len(chunks))
+	}
+	// 覆盖性不能丢——退化路径不该吞掉内容。
+	runes := []rune(content)
+	covered := make([]bool, len(runes))
+	for _, ch := range chunks {
+		for i := ch.StartOffset; i < ch.EndOffset; i++ {
+			covered[i] = true
+		}
+	}
+	for i := range runes {
+		if !covered[i] {
+			t.Fatalf("第 %d 个字符没有被覆盖（退化路径吞了内容）", i)
+		}
+	}
+}
+
+// firstN 截取前 n 个字符，用于报错信息。按 rune 截，别把汉字切成半个。
+func firstN(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
