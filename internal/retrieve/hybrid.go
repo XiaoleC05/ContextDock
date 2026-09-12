@@ -58,8 +58,28 @@ type LexicalSearcher interface {
 }
 
 // VectorSearcher 是向量检索的抽象。VectorIndex 实现了它。
+//
+// # 为什么它带 ctx 而 LexicalSearcher 不带
+//
+// 向量检索**可能打到数据库**（见 store.EmbeddingSearcher）：那种实现
+// 必须能被打断，否则一次慢查询会一直占着资源。内存版（VectorIndex）
+// 用不上 ctx，但它也得收下——接口只能按最严格的那个实现来定。
+//
+// LexicalSearcher 暂时还是纯内存的 BM25，等它也下推到数据库时
+// 要一并加 ctx（那时 hybrid 里两个 goroutine 的写法会对称）。
+//
+// # 返回值的契约
+//
+// 返回**至多** topK 条，按相似度降序。
+//
+// ⚠️ **不保证穷尽，也不保证包含真正的最近邻**——数据库后端的
+// HNSW 是近似索引，返回条数可能少于 topK。调用方不得假设
+// `len(results) == topK`。
+//
+// 这个契约对内存实现同样成立（它会跳过零模长的片段），
+// 所以不是为近似索引临时开的口子，而是把既有事实写下来。
 type VectorSearcher interface {
-	Search(query []float32, topK int) ([]types.SearchResult, error)
+	Search(ctx context.Context, query []float32, topK int) ([]types.SearchResult, error)
 }
 
 // BM25Searcher 把 BM25 适配成 LexicalSearcher。
@@ -196,7 +216,7 @@ func (h *Hybrid) search(ctx context.Context, query string, queryVec []float32, t
 	}()
 
 	go func() {
-		res, err := h.vector.Search(queryVec, n)
+		res, err := h.vector.Search(ctx, queryVec, n)
 		out <- pathOut{
 			run: Run{Retriever: types.RetrieverVector, Results: res},
 			err: err,

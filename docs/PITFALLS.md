@@ -169,6 +169,11 @@ curl -d @req.json https://api.siliconflow.cn/v1/embeddings
 | ⚠️ `ORDER BY` 必须与索引定义**逐字一致** | 写错维度会**静默**退化成全表扫描 |
 | ⚠️ HNSW 是近似索引 | 带 `WHERE` 过滤时返回行数可能少于 `LIMIT`，需要 `SET hnsw.iterative_scan` |
 | ⚠️ `hnsw.ef_search` 默认 40 偏低 | 建议 100 起步，用真实查询集测 recall@10 后定。用 `SET LOCAL`，别用 `SET`（会污染连接池里复用的连接） |
+| ⚠️ **规划器用不用 HNSW 是「非单调」的** | 实测：1000 片段→顺序扫描，**5000→走索引**，20000→又回顺序扫描。所以「表越大越会用索引」是错的，也**别在某个固定 N 上断言"必须走索引"**——那是个会随 pgvector 版本和统计信息漂移的脆弱断言。要断言就断言「禁掉顺序扫描后索引可用」（`SET LOCAL enable_seqscan = off`），那才抓得到算子写错 |
+| ⚠️ `SET LOCAL` 要求有事务 | 连接池下必须 `BEGIN; SET LOCAL …; SELECT …; COMMIT;`。直接用 `pool.Exec("SET …")` 会落在**随机一条**连接上，而且因为不是 `LOCAL` 还会留在池里污染后续查询 |
+| ⚠️ 近邻查询**必须**把 `metadata` 一起 select | 评测的命中判定读 `Metadata["source"]`。漏了它，**所有 recall 会静默归零**，而报告照样打印出一张像模像样的表 |
+| ⚠️ 近邻查询**不要** select `embedding` | 它是全表最贵的一列（1024 维转 text 有十几 KB），而检索下游没有任何地方读 `Chunk.Embedding`。带上它等于把想省的内存和带宽原样搬回来 |
+| ⚠️ `<=>` 返回的是**距离**不是相似度 | 填进 `Score`/`VectorScore` 前要 `1 - distance`。填反了**排序不变**（SQL 里已经排好），融合结果照常正确，只有暴露给 Agent 的 `vector_score` 是错的——而 RRF 不看分数，现有测试一个都抓不到 |
 | ⚠️ 建索引消耗大量内存 | 受 `maintenance_work_mem` 限制，默认值偏小会退化成磁盘构建，**慢 10–50 倍** |
 
 ### pgx 专属

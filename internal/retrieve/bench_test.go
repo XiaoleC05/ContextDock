@@ -118,7 +118,7 @@ func BenchmarkVectorSearch(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := idx.Search(query, benchTopK); err != nil {
+		if _, err := idx.Search(context.Background(), query, benchTopK); err != nil {
 			b.Fatal(err)
 		}
 	}

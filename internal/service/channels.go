@@ -45,12 +45,12 @@ func (s *Service) SearchChannels(ctx context.Context, query string, topK, rrfK, 
 
 	// 取快照，理由同 Service.Search：安全性来自「已发布对象永不改写」，
 	// 不是来自把锁盖住整个检索过程。见 Service.idxMu 的说明。
-	bm25, vecIdx := s.snapshot()
+	bm25, vecSearch, embedded := s.snapshot()
 
 	out := &ChannelRuns{Query: query}
 
 	bm25Empty := bm25.Len() == 0
-	vecEmpty := vecIdx.Len() == 0
+	vecEmpty := embedded == 0
 	if bm25Empty && vecEmpty {
 		out.Degraded = "索引为空"
 		return out, nil
@@ -97,13 +97,13 @@ func (s *Service) SearchChannels(ctx context.Context, query string, topK, rrfK, 
 	}
 
 	var err error
-	if out.Vector, err = vecIdx.Search(queryVec, topK); err != nil {
+	if out.Vector, err = vecSearch.Search(ctx, queryVec, topK); err != nil {
 		return nil, fmt.Errorf("service: 向量检索失败: %w", err)
 	}
 
 	hybrid := retrieve.NewHybrid(
 		retrieve.BM25Searcher{BM25: bm25},
-		vecIdx,
+		vecSearch,
 	).WithTimeout(s.cfg.SearchTimeout)
 	if rrfK > 0 {
 		hybrid = hybrid.WithRRFK(rrfK)

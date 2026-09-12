@@ -12,6 +12,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -62,6 +63,19 @@ type Service struct {
 	idxMu  sync.RWMutex
 	bm25   *retrieve.BM25
 	vecIdx *retrieve.VectorIndex
+
+	// storeVec 是**存储提供的**向量检索器；为 nil 表示存储没这个能力，
+	// 此时用进程内的 vecIdx 暴力扫描。
+	//
+	// ⚠️ 这里刻意**不缓存"当前生效的那个"**。
+	//
+	// 第一版就是那么写的：构造时算好 `vecSearcher` 指向谁，
+	// 结果 `Rebuild` 换掉了 `s.vecIdx` 却没换 `vecSearcher`——
+	// 检索从此永远走一个**空的**旧索引，向量路静默失效，
+	// 而所有日志和结果看起来都正常。是 mcp 的一个测试抓到的。
+	//
+	// 现在只在快照时二选一（见 snapshot），真相只有一份。
+	storeVec retrieve.VectorSearcher
 
 	// byDoc 按 DocumentID 分组的片段，组内按 Ordinal 升序。
 	//
@@ -126,15 +140,54 @@ func New(cfg *config.Config, emb embed.Embedder, st store.Store) (*Service, erro
 	// 而新旧实例必须共用**同一个**分词器。
 	tok := tokenize.NewWith(cfg.TokenizeScheme)
 
-	return &Service{
+	vecIdx := retrieve.NewVectorIndex()
+	svc := &Service{
 		cfg:      cfg,
 		embedder: emb,
 		store:    st,
 		ingester: ingest.New(chunker, emb, st),
 		tok:      tok,
 		bm25:     retrieve.NewBM25().WithTokenizer(tok),
-		vecIdx:   retrieve.NewVectorIndex(),
-	}, nil
+		vecIdx:   vecIdx,
+	}
+
+	// 存储自己能做近邻检索时优先用它——那意味着查询能走 pgvector 的
+	// HNSW 索引，而不是把全部向量读进内存再暴力算一遍。
+	//
+	// ⚠️ 用类型断言而不是配置开关：存储**有没有**这个能力是类型系统
+	// 回答得了的问题，多一个配置项只会多一种"配错了但看起来正常"的组合。
+	// 断言失败时必须留下痕迹，所以下面打日志——否则 #68 等于没修，
+	// 而所有测试照样全绿。
+	if es, ok := st.(store.EmbeddingSearcher); ok {
+		svc.storeVec = storeVectorSearcher{inner: es}
+		log.Printf("向量检索后端：存储（%T），走库内近邻索引", st)
+	} else {
+		log.Printf("向量检索后端：进程内暴力扫描（%T 没有查库的向量检索能力）", st)
+	}
+	return svc, nil
+}
+
+// storeVectorSearcher 把存储的向量检索能力适配成 retrieve.VectorSearcher。
+//
+// 两边的签名几乎一样，唯一的差别是**错误哨兵**：retrieve 和 store
+// 各有一个 ErrVectorDim。不翻译的话，同一条降级逻辑会在两个后端上
+// 看到两种错误类型——上层用 errors.Is 就不一致了。
+type storeVectorSearcher struct {
+	inner store.EmbeddingSearcher
+}
+
+// Search 实现 retrieve.VectorSearcher。
+func (s storeVectorSearcher) Search(ctx context.Context, query []float32, topK int) ([]types.SearchResult, error) {
+	res, err := s.inner.SearchByEmbedding(ctx, query, topK)
+	if err != nil {
+		if errors.Is(err, store.ErrVectorDim) {
+			return nil, fmt.Errorf("%w: %v", retrieve.ErrVectorDim, err)
+		}
+		// ⚠️ 其余错误保持原样往外传，但要带上是哪个后端——
+		// 否则运维看到的是一条裸 pgx 错误，不知道它在说哪条路。
+		return nil, fmt.Errorf("service: 库内向量检索失败: %w", err)
+	}
+	return res, nil
 }
 
 // Rebuild 从存储重建内存索引。
@@ -171,9 +224,17 @@ func (s *Service) Rebuild(ctx context.Context) error {
 			withVec = append(withVec, c)
 		}
 	}
-	vecIdx := retrieve.NewVectorIndex()
-	if err := vecIdx.Index(withVec); err != nil {
-		return fmt.Errorf("service: 重建向量索引失败: %w", err)
+	// 向量检索在存储侧完成时**不重建**内存向量索引：建了也没人用，
+	// 而它要把全部向量再挂一遍。内存后端才需要。
+	//
+	// ⚠️ 注意这**不等于**向量已经不进内存了——AllChunks 为了建 BM25
+	// 仍然会把全部片段（含向量）读进来。真正的内存收益是 #70 的事。
+	var vecIdx *retrieve.VectorIndex
+	if s.storeVec == nil {
+		vecIdx = retrieve.NewVectorIndex()
+		if err := vecIdx.Index(withVec); err != nil {
+			return fmt.Errorf("service: 重建向量索引失败: %w", err)
+		}
 	}
 
 	// 正文体积在重建时顺手算掉：评测要用它判断「切得越碎、索引涨多快」，
@@ -201,7 +262,11 @@ func (s *Service) Rebuild(ctx context.Context) error {
 	// 那会让「已发布对象永不改写」失效。见 Service.idxMu 的说明。
 	s.idxMu.Lock()
 	s.bm25 = bm25
-	s.vecIdx = vecIdx
+	// ⚠️ 只在内存后端覆盖 vecIdx。存储后端下它是构造时那个**空**实例，
+	// 而 s.vecSearcher 指向的是存储适配器，两者互不影响。
+	if vecIdx != nil {
+		s.vecIdx = vecIdx
+	}
 	s.byDoc = byDoc
 	s.indexedChunks = len(chunks)
 	s.embeddedCount = len(withVec)
@@ -221,10 +286,23 @@ func (s *Service) Rebuild(ctx context.Context) error {
 //
 // 返回的对象依据 Rebuild 的不变量保证不会再被改写，所以调用方
 // 拿它们跑多久都不会与重建冲突。
-func (s *Service) snapshot() (*retrieve.BM25, *retrieve.VectorIndex) {
+//
+// 第三个返回值是「有多少片段带向量」。调用方用它判断向量路可不可用——
+// 那是**数据**的问题（库里有向量吗），不是**实现**的问题，
+// 所以存储后端和内存后端共用同一个判断，不必去问具体的检索器。
+func (s *Service) snapshot() (*retrieve.BM25, retrieve.VectorSearcher, int) {
 	s.idxMu.RLock()
 	defer s.idxMu.RUnlock()
-	return s.bm25, s.vecIdx
+
+	// 二选一**在这里**做，而不是构造时算好存起来。
+	//
+	// 构造时缓存过一次，结果是 Rebuild 换掉 s.vecIdx 之后
+	// 缓存还指着旧实例——向量路静默失效。见 storeVec 的说明。
+	vec := retrieve.VectorSearcher(s.vecIdx)
+	if s.storeVec != nil {
+		vec = s.storeVec
+	}
+	return s.bm25, vec, s.embeddedCount
 }
 
 // Stats 返回索引状态，供日志和诊断使用。
@@ -271,12 +349,12 @@ func (s *Service) Search(ctx context.Context, query string, topK int) (*SearchOu
 	//
 	// 安全性来自 Rebuild 的「已发布对象永不改写」不变量，
 	// **不是**来自「锁覆盖住了检索」。见 Service.idxMu 的说明。
-	bm25, vecIdx := s.snapshot()
+	bm25, vecSearch, embedded := s.snapshot()
 
 	out := &SearchOutput{Query: query, TopK: topK}
 
 	bm25Empty := bm25.Len() == 0
-	vecEmpty := vecIdx.Len() == 0
+	vecEmpty := embedded == 0
 
 	// 两路都不可用时没有降级空间，直接返回空。
 	if bm25Empty && vecEmpty {
@@ -326,7 +404,7 @@ func (s *Service) Search(ctx context.Context, query string, topK int) (*SearchOu
 
 	hybrid := retrieve.NewHybrid(
 		retrieve.BM25Searcher{BM25: bm25},
-		vecIdx,
+		vecSearch,
 	).WithTimeout(s.cfg.SearchTimeout).
 		WithErrorHandler(func(r types.Retriever, err error) {
 			log.Printf("%s 检索失败，已降级: %v", r, err)

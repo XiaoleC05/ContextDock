@@ -155,10 +155,11 @@ func buildStore(ctx context.Context, cfg *config.Config) (store.Store, error) {
 		return store.NewMemory(), nil
 	}
 
-	st, err := store.NewPostgres(ctx, cfg.DatabaseURL, cfg.PoolMaxConns)
+	st, err := store.NewPostgres(ctx, cfg.DatabaseURL, cfg.PoolMaxConns, cfg.HNSWEfSearch)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("已连接 PostgreSQL（连接池上限 %d）", cfg.PoolMaxConns)
+	log.Printf("已连接 PostgreSQL（连接池上限 %d，HNSW ef_search 下界 %d）",
+		cfg.PoolMaxConns, cfg.HNSWEfSearch)
 	return st, nil
 }

@@ -268,6 +268,7 @@ func TestValidateCrossField(t *testing.T) {
 		ChunkMaxRunes:     400,
 		ChunkOverlap:      60,
 		PoolMaxConns:      8,
+		HNSWEfSearch:      DefaultHNSWEfSearch,
 	}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("基准配置应当合法: %v", err)
@@ -282,6 +283,8 @@ func TestValidateCrossField(t *testing.T) {
 		{"overlap 为负", func(c *Config) { c.ChunkOverlap = -1 }},
 		{"超时为 0", func(c *Config) { c.SearchTimeout = 0 }},
 		{"连接池为 0", func(c *Config) { c.PoolMaxConns = 0 }},
+		{"HNSW 搜索宽度为 0", func(c *Config) { c.HNSWEfSearch = 0 }},
+		{"HNSW 搜索宽度为负", func(c *Config) { c.HNSWEfSearch = -1 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

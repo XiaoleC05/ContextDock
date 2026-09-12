@@ -42,7 +42,7 @@ func TestCosineSimilarityBasics(t *testing.T) {
 	}
 
 	// 不截断，拿到全部三条的分数
-	got, err := idx.Search(vec(1), 0)
+	got, err := idx.Search(context.Background(), vec(1), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestCosineRange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := idx.Search(vec(1, 2, 3), 0)
+	got, err := idx.Search(context.Background(), vec(1, 2, 3), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestVectorRankAndScoreFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := idx.Search(vec(1), 0)
+	got, err := idx.Search(context.Background(), vec(1), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestVectorRejectsBadDimension(t *testing.T) {
 	if err := idx.Index([]types.Chunk{mkEmbedded(1, "正常", vec(1))}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := idx.Search(make([]float32, 100), 10); !errors.Is(err, ErrVectorDim) {
+	if _, err := idx.Search(context.Background(), make([]float32, 100), 10); !errors.Is(err, ErrVectorDim) {
 		t.Errorf("查询向量维度错误应返回 ErrVectorDim，实际 %v", err)
 	}
 }
@@ -173,7 +173,7 @@ func TestVectorRejectsZeroQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := idx.Search(make([]float32, types.EmbeddingDim), 10)
+	_, err := idx.Search(context.Background(), make([]float32, types.EmbeddingDim), 10)
 	if !errors.Is(err, ErrZeroVector) {
 		t.Errorf("零向量查询应返回 ErrZeroVector，实际 %v", err)
 	}
@@ -189,7 +189,7 @@ func TestVectorSkipsZeroNormDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := idx.Search(vec(1), 0)
+	got, err := idx.Search(context.Background(), vec(1), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestVectorSkipsZeroNormDocuments(t *testing.T) {
 func TestVectorEdgeCases(t *testing.T) {
 	t.Run("空索引", func(t *testing.T) {
 		idx := NewVectorIndex()
-		got, err := idx.Search(vec(1), 10)
+		got, err := idx.Search(context.Background(), vec(1), 10)
 		if err != nil {
 			t.Fatalf("空索引不应报错: %v", err)
 		}
@@ -223,7 +223,7 @@ func TestVectorEdgeCases(t *testing.T) {
 		if err := idx.Index(chunks); err != nil {
 			t.Fatal(err)
 		}
-		got, err := idx.Search(vec(1, 2), 2)
+		got, err := idx.Search(context.Background(), vec(1, 2), 2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +257,7 @@ func TestVectorStableTieBreak(t *testing.T) {
 
 func mustSearch(t *testing.T, idx *VectorIndex, q []float32, topK int) []types.SearchResult {
 	t.Helper()
-	got, err := idx.Search(q, topK)
+	got, err := idx.Search(context.Background(), q, topK)
 	if err != nil {
 		t.Fatalf("Search 失败: %v", err)
 	}
