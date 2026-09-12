@@ -44,6 +44,41 @@ type Service struct {
 	// 检索到的统计信息，用于日志和诊断。
 	indexedChunks int
 	embeddedCount int
+	textBytes     int64
+}
+
+// IndexStats 是内存索引的规模。
+//
+// 单独开一个方法而不是往 Stats() 上加返回值：Stats() 的二元组
+// 已经在别处被用着，改签名要动所有调用点，而那些调用点并不关心体积。
+type IndexStats struct {
+	// Chunks 是索引里的片段总数。
+	Chunks int
+
+	// Embedded 是其中带向量的片段数。
+	Embedded int
+
+	// TextBytes 是片段正文的字节总量（不含向量）。
+	TextBytes int64
+
+	// VectorBytes 是向量占用的字节数，按 float32 × 维度估算。
+	//
+	// ⚠️ 这是**进程内**的内存占用，不是数据库里的存储占用。
+	// 两者在 pgvector 那边不完全相等（有行开销和索引），
+	// 但对「切得越碎、索引涨多快」这个量级判断已经够用。
+	VectorBytes int64
+}
+
+// IndexStats 返回当前内存索引的规模。
+func (s *Service) IndexStats() IndexStats {
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	return IndexStats{
+		Chunks:      s.indexedChunks,
+		Embedded:    s.embeddedCount,
+		TextBytes:   s.textBytes,
+		VectorBytes: int64(s.embeddedCount) * types.EmbeddingDim * 4,
+	}
 }
 
 // New 组装一个 Service。
@@ -96,6 +131,14 @@ func (s *Service) Rebuild(ctx context.Context) error {
 
 	s.indexedChunks = len(chunks)
 	s.embeddedCount = len(withVec)
+
+	// 正文体积在重建时顺手算掉：评测要用它判断「切得越碎、索引涨多快」，
+	// 而为此再遍历一遍全部片段不值得。
+	var textBytes int64
+	for _, c := range chunks {
+		textBytes += int64(len(c.Content))
+	}
+	s.textBytes = textBytes
 
 	if len(chunks) > 0 && len(withVec) < len(chunks) {
 		// 这条日志很重要：说明有一批片段没有向量，

@@ -325,8 +325,12 @@ func TestNewRejectsBadConfig(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"OverlapRunes 为负", Config{MaxRunes: 100, OverlapRunes: -1}},
-		{"OverlapRunes 大于 MaxRunes", Config{MaxRunes: 100, OverlapRunes: 100}},
+		// ⚠️ 「OverlapRunes 为负」这条**被移除了**：负数是「未设置」的哨兵，
+		// 会回落成默认值，不再是一个错误。见 TestZeroConfigSemantics。
+		//
+		// 边界必须留着：overlap 等于 maxRunes 时起点不前进，会死循环。
+		{"OverlapRunes 等于 MaxRunes", Config{MaxRunes: 100, OverlapRunes: 100}},
+		{"OverlapRunes 大于 MaxRunes", Config{MaxRunes: 100, OverlapRunes: 101}},
 		{"MaxRunes 为负", Config{MaxRunes: -5}},
 	}
 	for _, tt := range tests {
@@ -338,12 +342,62 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	}
 }
 
-// TestZeroConfigUsesDefaults 验证零值 Config 等价于默认配置。
-func TestZeroConfigUsesDefaults(t *testing.T) {
-	a := newChunker(t, Config{})
-	b := newChunker(t, DefaultConfig())
-	if a.cfg != b.cfg {
-		t.Errorf("零值配置应等价于默认配置: %+v vs %+v", a.cfg, b.cfg)
+// TestZeroConfigSemantics 记录零值 Config 的语义。
+//
+// ⚠️ 这条测试**改过**，原来断言的是 `Config{} == DefaultConfig()`。
+//
+// 那个约定逼着 normalize 拿 0 当「未设置」的哨兵，代价是
+// `OverlapRunes: 0`（完全不重叠——一个合法且有用的配置）
+// 会被静默改成 60，**用户没有办法关掉重叠**。
+//
+// 违反的正是本项目自己写在 types.Chunk.Ordinal 上的规则：
+// 0 是合法值，就不能拿它当"未设置"的哨兵。
+//
+// 新语义：MaxRunes 用 0 表示未设置（0 本来就不合法），
+// OverlapRunes 用负数表示未设置，0 按字面解释。
+func TestZeroConfigSemantics(t *testing.T) {
+	c := newChunker(t, Config{})
+	if c.cfg.MaxRunes != DefaultMaxRunes {
+		t.Errorf("MaxRunes 应回落成默认值 %d，实际 %d", DefaultMaxRunes, c.cfg.MaxRunes)
+	}
+	if c.cfg.OverlapRunes != 0 {
+		t.Errorf("OverlapRunes 应保持 0（不重叠），实际 %d", c.cfg.OverlapRunes)
+	}
+
+	// 想要默认重叠，得显式取 DefaultConfig()。
+	if d := newChunker(t, DefaultConfig()); d.cfg.OverlapRunes != DefaultOverlapRunes {
+		t.Errorf("DefaultConfig 的 OverlapRunes 应为 %d，实际 %d",
+			DefaultOverlapRunes, d.cfg.OverlapRunes)
+	}
+
+	// 负数才是「未设置」。
+	if n := newChunker(t, Config{MaxRunes: 100, OverlapRunes: -1}); n.cfg.OverlapRunes != DefaultOverlapRunes {
+		t.Errorf("负的 OverlapRunes 应回落成默认值 %d，实际 %d",
+			DefaultOverlapRunes, n.cfg.OverlapRunes)
+	}
+}
+
+// TestOverlapZeroDisablesOverlap 守护「重叠可以真的设为 0」。
+//
+// 没有这条测试的话，normalize 里把 0 当哨兵的老行为回来了也不会有人发现——
+// 而它返回来之后，参数扫描里 Overlap=0 那一列会悄悄变成「Overlap=60」，
+// 报告照样打印，数字看着也正常。
+func TestOverlapZeroDisablesOverlap(t *testing.T) {
+	content := strings.Repeat("零重叠测试内容。", 60)
+
+	c := newChunker(t, Config{MaxRunes: 100, OverlapRunes: 0})
+	chunks := mustSplit(t, c, 1, content)
+
+	if len(chunks) < 2 {
+		t.Fatalf("应当切出多个片段，实际 %d 个", len(chunks))
+	}
+	for i := 1; i < len(chunks); i++ {
+		if chunks[i].StartOffset < chunks[i-1].EndOffset {
+			t.Errorf("第 %d 个片段与上一个重叠了：[%d,%d) 与 [%d,%d)——"+
+				"OverlapRunes=0 没有被遵守",
+				i, chunks[i-1].StartOffset, chunks[i-1].EndOffset,
+				chunks[i].StartOffset, chunks[i].EndOffset)
+		}
 	}
 }
 

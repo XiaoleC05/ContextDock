@@ -102,7 +102,12 @@ func (o Options) Normalize() Options {
 	if o.MaxRunes <= 0 {
 		o.MaxRunes = config.DefaultChunkMaxRunes
 	}
-	if o.Overlap <= 0 {
+	// ⚠️ 判据是**负数**不是 <= 0。
+	//
+	// 与 chunk.Config 同一套语义：0 是合法的重叠值（完全不重叠）。
+	// 写成 <= 0 的话，`-overlap 0` 会被静默换成 60——
+	// 参数扫描里 Overlap=0 那一列就永远是假的，而报告上看不出来。
+	if o.Overlap < 0 {
 		o.Overlap = config.DefaultChunkOverlap
 	}
 	if o.NDCGK <= 0 {
@@ -172,6 +177,22 @@ type Report struct {
 	// Corpus 是本次导入的语料规模。
 	Corpus []CorpusStat `json:"corpus"`
 
+	// TotalChunks 是本次导入产生的片段总数。
+	TotalChunks int `json:"total_chunks"`
+
+	// TextBytes / VectorBytes 是索引体积。切分扫描要靠它们识别
+	// 「切得越碎 recall 越高、但索引爆炸」这类病态参数。
+	TextBytes   int64 `json:"text_bytes"`
+	VectorBytes int64 `json:"vector_bytes"`
+
+	// ImportMs 是导入并建好内存索引的墙钟耗时（毫秒）。
+	//
+	// ⚠️ 它包含**嵌入耗时**。嵌入缓存命中时这部分接近 0，
+	// 于是这个数主要反映切分与建索引的成本；
+	// 冷缓存时它会被网络往返淹没，不能拿来比较切分参数。
+	// 报告里同时给出缓存命中数，就是为了让读的人能判断这一点。
+	ImportMs int64 `json:"import_ms"`
+
 	// Origins 是语料清单，记进报告以满足可复现性要求（#58）。
 	Origins []CorpusFile `json:"origins"`
 
@@ -236,6 +257,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 	defer func() { _ = svc.Close() }()
 
 	// ---- 导入语料 ----
+	importStart := time.Now()
 	sources := suite.Sources()
 	stats := make([]CorpusStat, 0, len(sources))
 	for _, src := range sources {
@@ -265,7 +287,9 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 
 	// 把 service 里的索引规模报出来，确认导入确实落到了索引上。
 	total, embedded := svc.Stats()
-	logf("索引就绪：%d 个片段，其中 %d 个带向量", total, embedded)
+	idx := svc.IndexStats()
+	importMs := time.Since(importStart).Milliseconds()
+	logf("索引就绪：%d 个片段，其中 %d 个带向量，耗时 %dms", total, embedded, importMs)
 	if embedded < total {
 		return nil, fmt.Errorf("eval: %d/%d 个片段没有向量，向量通道不完整，"+
 			"此时任何关于向量或融合的数字都不可信", total-embedded, total)
@@ -273,10 +297,14 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 
 	// ---- 跑查询 ----
 	rep := &Report{
-		Options: opt,
-		Corpus:  stats,
-		Origins: suite.Corpus.Files,
-		Overall: make(map[Channel]Aggregate, len(AllChannels)),
+		Options:     opt,
+		Corpus:      stats,
+		Origins:     suite.Corpus.Files,
+		TotalChunks: idx.Chunks,
+		TextBytes:   idx.TextBytes,
+		VectorBytes: idx.VectorBytes,
+		ImportMs:    importMs,
+		Overall:     make(map[Channel]Aggregate, len(AllChannels)),
 	}
 	// 嵌入统计在全部查询跑完之后再读——中途读会漏掉后半段。
 	// 用接口断言而不是把 Cache 类型写进签名：评测器只依赖 embed.Embedder，

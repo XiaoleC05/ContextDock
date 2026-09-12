@@ -26,14 +26,17 @@ func WriteTable(w io.Writer, rep *Report) error {
 	fmt.Fprintf(w, "评测参数：切分 %d/%d，RRF k=%d，候选倍数 %d，topK=%d，NDCG@%d\n",
 		o.MaxRunes, o.Overlap, o.RRFK, o.Mult, o.TopK, o.NDCGK)
 
-	total := 0
 	parts := make([]string, 0, len(rep.Corpus))
 	for _, c := range rep.Corpus {
-		total += c.Chunks
 		parts = append(parts, fmt.Sprintf("%s %d", c.Source, c.Chunks))
 	}
-	fmt.Fprintf(w, "语料：%d 份，共 %d 个片段（%s）\n\n",
-		len(rep.Corpus), total, strings.Join(parts, " / "))
+	fmt.Fprintf(w, "语料：%d 份，共 %d 个片段（%s）\n",
+		len(rep.Corpus), rep.TotalChunks, strings.Join(parts, " / "))
+	// 索引体积与构建耗时放在这里，是因为切分扫描必须同时看它们：
+	// 「切得越碎 recall 越高」几乎总是成立，只看 recall 会选出病态参数。
+	fmt.Fprintf(w, "索引：正文 %s + 向量 %s = %s；导入并建索引耗时 %dms\n\n",
+		humanBytes(rep.TextBytes), humanBytes(rep.VectorBytes),
+		humanBytes(rep.TextBytes+rep.VectorBytes), rep.ImportMs)
 
 	// ---- 按子集 ----
 	fmt.Fprintln(w, "按子集分通道成绩：")
@@ -142,6 +145,21 @@ func writeLexicalRequired(w io.Writer, rep *Report) {
 // ---- 排版 ----
 
 func pct(v float64) string { return fmt.Sprintf("%.3f", v) }
+
+// humanBytes 把字节数写成方便读的形式。
+//
+// 用 1024 进制而不是 1000：这里的数字是给人估量级用的
+// （"这参数会不会让索引爆炸"），而不是要拿去做精确计算。
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
 
 func signed(v float64) string { return fmt.Sprintf("%+.3f", v) }
 

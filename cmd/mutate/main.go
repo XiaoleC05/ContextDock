@@ -162,6 +162,17 @@ var mutations = []mutation{
 		new: `}`,
 	},
 
+	{
+		// ⚠️ 这条对应一个**真实存在过的 bug**：0 被当成「未设置」的哨兵，
+		// 于是 OverlapRunes=0（完全不重叠，一个合法配置）会被静默改成 60，
+		// 用户根本没有办法关掉重叠。
+		// 违反的是本项目自己写在 types.Chunk.Ordinal 上的规则。
+		name: "chunk: OverlapRunes=0 被当成未设置（真实缺陷）",
+		file: "internal/chunk/chunker.go",
+		old:  `if c.OverlapRunes < 0 {`,
+		new:  `if c.OverlapRunes <= 0 {`,
+	},
+
 	// ---- embed ----
 	// ⚠️ 这条是唯一含反引号的片段（Go 的 struct tag），
 	// 不能用裸字符串，只能退回普通字符串 + 转义。
@@ -469,6 +480,25 @@ var mutations = []mutation{
 	},
 
 	// ---- 嵌入缓存 ----
+	{
+		// 同上，在评测这一层：`-overlap 0` 被静默换成 60，
+		// 参数扫描里 Overlap=0 那一整列都是假的。
+		name: "eval: 候选重叠 0 被当成未传",
+		file: "internal/eval/run.go",
+		old:  `if o.Overlap < 0 {`,
+		new:  `if o.Overlap <= 0 {`,
+	},
+	{
+		// 候选倍数写成 1：基线跑在了一个不存在的配置上，
+		// 「融合比单路好多少」测的其实是「候选不够时融合好不好」。
+		// 写成 -2 而不是直接写 1：直接写 1 会让 retrieve 包失去引用，
+		// 编译不过（变异会被判 BROKEN 而不是 CAUGHT），
+		// 那样这条变异就失去意义了——我们要的是「能编译但行为错」。
+		name: "eval: 候选倍数默认写成 1 而非生产值",
+		file: "internal/eval/run.go",
+		old:  `o.Mult = retrieve.DefaultCandidateMultiplier`,
+		new:  `o.Mult = retrieve.DefaultCandidateMultiplier - 2`,
+	},
 	{
 		// 键里不带模型名：换模型后会静默读到旧模型的向量，
 		// 维度一样、跑得通，只是语义空间完全不同。

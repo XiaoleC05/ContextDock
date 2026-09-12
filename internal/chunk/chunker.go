@@ -52,15 +52,29 @@ func DefaultConfig() Config {
 	return Config{MaxRunes: DefaultMaxRunes, OverlapRunes: DefaultOverlapRunes}
 }
 
-// normalize 补全零值并做合法性检查。
+// normalize 补全未设置的字段并做合法性检查。
 //
-// 让零值可用（New(Config{}) 等价于 DefaultConfig()）是 Go 的惯用法，
-// 调用方不需要记住每个字段的默认值。
+// # ⚠️ 两个字段的「未设置」哨兵不一样，这是刻意的
+//
+// MaxRunes 用 0 表示未设置——0 个字符的片段本来就不合法，拿它当哨兵没有歧义。
+//
+// OverlapRunes **用负数**表示未设置。这里改过一次：
+// 原来两个字段都用 0，结果是 `OverlapRunes: 0`（完全不重叠，一个完全合法
+// 且有用的配置）会被静默改成 60，**用户根本没有办法关掉重叠**。
+//
+// 这条规则本项目已经写过一次，在 types.Chunk.Ordinal 的注释里：
+//
+//	> 0 是**合法值**……它不能像 ID 那样被当作"未设置"的哨兵。
+//	> 如果确实需要表达"未计算"，请另加字段，不要复用 0。
+//
+// 代价是 `New(Config{})` 不再等价于 `DefaultConfig()`——空的 Config 会得到
+// 不重叠的配置。想要默认值请显式写 `DefaultConfig()`。
+// 「零值即默认」这个惯用法很好，但它不能以牺牲一类合法配置为代价。
 func (c Config) normalize() (Config, error) {
 	if c.MaxRunes == 0 {
 		c.MaxRunes = DefaultMaxRunes
 	}
-	if c.OverlapRunes == 0 {
+	if c.OverlapRunes < 0 {
 		c.OverlapRunes = DefaultOverlapRunes
 	}
 	if c.MaxRunes < 1 {
