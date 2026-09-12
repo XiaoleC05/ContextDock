@@ -1,0 +1,10 @@
+{
+  "note": "由 cmd/eval -write-gate 生成；跑的是假嵌入，数字无质量含义",
+  "metrics": {
+    "fused_mrr": 0.40114379084967317,
+    "fused_ndcg": 0.40688355218412964,
+    "fused_recall": 0.49019607843137253,
+    "lexical_recall": 0.46078431372549017,
+    "vector_recall": 0.43137254901960786
+  }
+}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
@@ -29,6 +30,12 @@ const (
 	EnvChunkMaxRunes     = "CONTEXTDOCK_CHUNK_MAX_RUNES"
 	EnvChunkOverlap      = "CONTEXTDOCK_CHUNK_OVERLAP"
 	EnvPoolMaxConns      = "CONTEXTDOCK_POOL_MAX_CONNS"
+
+	// EnvContextNeighbors 控制上下文扩展：每条结果带出前后各几段（#49）。
+	EnvContextNeighbors = "CONTEXTDOCK_CONTEXT_NEIGHBORS"
+
+	// EnvMergeAdjacent 控制相邻片段合并（#50）。
+	EnvMergeAdjacent = "CONTEXTDOCK_MERGE_ADJACENT"
 )
 
 // 默认值。
@@ -44,6 +51,24 @@ const (
 	// 28 条连接。单机 MCP server 根本用不到那么多，还会和容器里的
 	// max_connections 叠加。这里显式收窄。
 	DefaultPoolMaxConns = 8
+
+	// DefaultContextNeighbors 是上下文扩展默认带出的相邻片段数。
+	//
+	// 取 1 而不是 0：命中片段常常只写着「运行 go build」，
+	// 没有前后文的话 Agent 不知道它在讲什么。带一段就够定位语境了。
+	//
+	// 上限由输出体积决定，不由"能带几段"决定——见 mcp 包里的截断说明。
+	DefaultContextNeighbors = 1
+
+	// DefaultMergeAdjacent 是相邻片段合并的默认开关。
+	//
+	// 默认**开**，依据是实测（四组切分参数，见 BENCHMARKS.md）：
+	// recall 两平两升、无一下降，NDCG@10 全部提升 0.05~0.09，
+	// top-k 覆盖的不同文档数从 3.3~3.6 升到 3.6~3.95。
+	//
+	// 它解决的问题是「top-10 里三四条都是同一处内容，别的文档挤不进来」，
+	// 而那个问题光看 recall 是看不出来的。
+	DefaultMergeAdjacent = true
 )
 
 var (
@@ -76,6 +101,23 @@ type Config struct {
 	// 切分
 	ChunkMaxRunes int
 	ChunkOverlap  int
+
+	// ContextNeighbors 是每条检索结果带出的相邻片段数（前后各这么多段），
+	// 0 表示不做上下文扩展。
+	ContextNeighbors int
+
+	// MergeAdjacent 为真时，把同一文档里序号连续的命中合并成一条（#50）。
+	//
+	// 目的是腾出结果位：同一处内容占掉三四条时，别的文档就挤不进来了。
+	MergeAdjacent bool
+
+	// 分词方案（CJK 部分）。
+	//
+	// ⚠️ **刻意不接环境变量。** 它是 #45 对比实验用的旋钮，
+	// 不是用户配置：当前选型（bigram）是 DESIGN §3 的结论，
+	// 多暴露一个用户可调的旋钮，就多一组需要长期维护和测试的组合。
+	// 实验做完、结论落地之后，这个字段要么被写死，要么按结论换掉默认值。
+	TokenizeScheme tokenize.Scheme
 
 	// EmbeddingDim 是向量维度，从 types 带入，方便统一引用。
 	EmbeddingDim int
@@ -117,6 +159,9 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		SearchTimeout:      DefaultSearchTimeout,
 		ChunkMaxRunes:      DefaultChunkMaxRunes,
 		ChunkOverlap:       DefaultChunkOverlap,
+		TokenizeScheme:     tokenize.SchemeBigram,
+		ContextNeighbors:   DefaultContextNeighbors,
+		MergeAdjacent:      DefaultMergeAdjacent,
 		PoolMaxConns:       DefaultPoolMaxConns,
 		EmbeddingDim:       types.EmbeddingDim,
 	}
@@ -143,6 +188,15 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		cfg.DatabaseURL = v
 	}
 
+	if v, ok := getenv(EnvMergeAdjacent); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s=%q 不是合法的布尔值",
+				ErrBadValue, EnvMergeAdjacent, v)
+		}
+		cfg.MergeAdjacent = b
+	}
+
 	if v, ok := getenv(EnvUseMemoryStore); ok {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
@@ -167,6 +221,9 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		return nil, err
 	}
 	if cfg.ChunkOverlap, err = intVar(getenv, EnvChunkOverlap, cfg.ChunkOverlap); err != nil {
+		return nil, err
+	}
+	if cfg.ContextNeighbors, err = intVar(getenv, EnvContextNeighbors, cfg.ContextNeighbors); err != nil {
 		return nil, err
 	}
 	if n, err := intVar(getenv, EnvPoolMaxConns, int(cfg.PoolMaxConns)); err != nil {
@@ -203,6 +260,23 @@ func (c *Config) Validate() error {
 	if c.ChunkOverlap < 0 || c.ChunkOverlap >= c.ChunkMaxRunes {
 		return fmt.Errorf("%w: ChunkOverlap(%d) 必须 >=0 且小于 ChunkMaxRunes(%d)",
 			ErrBadValue, c.ChunkOverlap, c.ChunkMaxRunes)
+	}
+	// ⚠️ 空值放行，表示「用默认方案」。
+	//
+	// 与 ChunkOverlap 那条**刻意不同**：那边 0 是一个有意义的取值，
+	// 所以不能拿零值当哨兵；这边空串没有任何合理解释，
+	// 「空 = 默认」是安全的，也让手写的 config.Config{} 仍然可用。
+	//
+	// 一致性由 tokenize.NewWith 兜底：它对非法方案也回落成 bigram。
+	if c.TokenizeScheme != "" && !c.TokenizeScheme.Valid() {
+		return fmt.Errorf("%w: TokenizeScheme=%q 不是合法方案（%v）",
+			ErrBadValue, c.TokenizeScheme, tokenize.AllSchemes)
+	}
+	// 允许 0（关掉上下文扩展），但不能为负——负数在 mcp 那边会退化成
+	// "不取邻居"，静默地什么也不做，而配置看起来是生效的。
+	if c.ContextNeighbors < 0 {
+		return fmt.Errorf("%w: ContextNeighbors 不能为负，实际 %d",
+			ErrBadValue, c.ContextNeighbors)
 	}
 	if c.SearchTimeout <= 0 {
 		return fmt.Errorf("%w: SearchTimeout 必须为正数，实际 %v", ErrBadValue, c.SearchTimeout)

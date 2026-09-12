@@ -129,12 +129,51 @@ func Load(root string) (*Suite, error) {
 		return nil, err
 	}
 
-	sets, err := loadQuerySets(filepath.Join(base, QueriesDir), corpus, contents)
+	// 每份语料按默认参数切一遍。两处都要用：同义改写组拿它做字面重叠检查，
+	// 下面拿它核对清单里记的片段数对不对。**算一次共用，别算两遍**——
+	// 两处各切一次的话，它们迟早会因为某一处换了参数而对不上。
+	chunked := chunkAll(contents, corpusSources(corpus))
+
+	// 核对清单里的 chunks_at_default。
+	//
+	// ⚠️ 这条校验的意义不只是"清单写错了"。它顺手把一件更要紧的事拦住了：
+	// **改了切分逻辑却没重打指纹**。那种情况下评测数字会悄悄变化，
+	// 而没有任何东西会提醒——#47 之后就真实发生过一次
+	// （`chunks_at_default` 从 196 变成 203，过了很久才发现）。
+	if err := checkChunkCounts(corpus, chunked); err != nil {
+		return nil, err
+	}
+
+	sets, err := loadQuerySets(filepath.Join(base, QueriesDir), corpus, contents, chunked)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Suite{Corpus: corpus, Sets: sets, contents: contents}, nil
+}
+
+// checkChunkCounts 核对清单里的片段数与当前切分结果。
+func checkChunkCounts(corpus *Corpus, chunked map[string][]types.Chunk) error {
+	var bad []string
+	for _, f := range corpus.Files {
+		// 清单里没记过（0）就跳过：那是"还没打过指纹"，
+		// 由 -stamp 去处理，不是这里该报的错。
+		if f.ChunksAtDefault == 0 {
+			continue
+		}
+		got := len(chunked[f.Source])
+		if got != f.ChunksAtDefault {
+			bad = append(bad, fmt.Sprintf("%s: 清单记 %d，实际切出 %d",
+				f.Source, f.ChunksAtDefault, got))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("语料片段数与清单不符：\n  %s\n"+
+		"  改过切分逻辑或参数？重打一次即可：\n"+
+		"    go run ./cmd/eval -stamp",
+		strings.Join(bad, "\n  "))
 }
 
 // loadQuerySets 读取评测集目录下全部 *.json 并校验。
@@ -143,7 +182,8 @@ func Load(root string) (*Suite, error) {
 //  1. 读文件、解析（语法错误在这里拦住）
 //  2. 逐条校验字段、定位引文（语义错误在这里拦住）
 //  3. 跨文件查重（重复 query 只有看全所有文件才能发现）
-func loadQuerySets(dir string, corpus *Corpus, contents map[string]string) ([]QuerySet, error) {
+func loadQuerySets(dir string, corpus *Corpus, contents map[string]string,
+	chunked map[string][]types.Chunk) ([]QuerySet, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("eval: 读取评测集目录 %s 失败: %w", dir, err)
@@ -156,10 +196,6 @@ func loadQuerySets(dir string, corpus *Corpus, contents map[string]string) ([]Qu
 		seenQuery = make(map[string]string)
 		seenID    = make(map[string]string)
 	)
-
-	// 每份语料按默认参数切一遍，供同义改写组做字面重叠检查。
-	// 切分是纯内存计算，5 份文档 200 个片段，成本可以忽略。
-	chunked := chunkAll(contents, corpusSources(corpus))
 
 	// 排序遍历：ReadDir 本身就按文件名排序，这里显式排一次是为了
 	// 让「报错的顺序」也确定 —— 否则同一份错误数据在不同机器上
@@ -184,6 +220,11 @@ func loadQuerySets(dir string, corpus *Corpus, contents map[string]string) ([]Qu
 			// 再往下校验只会报出一堆由它派生的假问题。
 			return nil, err
 		}
+
+		// 与语料指纹同一套口径（先归一化换行再算 sha256）。
+		// 两处口径不一致的话，同一份评测集在本机和 CI 上指纹不同，
+		// 而"可复现性"的第一步就是"确认读的是同一份输入"。
+		set.SHA256 = Fingerprint(string(raw))
 
 		where := e.Name()
 		if set.Version != FormatVersion {
@@ -266,8 +307,13 @@ func validateQuery(q *Query, seq int, group Group, corpus *Corpus, contents map[
 		problems.Addf("%s: kind=%q 不是合法值（direct / indirect / multi-hop）", where, q.Kind)
 	}
 
+	// norel 组按定义就没有期望命中——它期望的是"没有结果"。
+	// 别的组为空则一定是漏标了：那条 query 在任何指标里都会恒为未召回，
+	// 悄悄拉低整体分数而没人知道。
 	if len(q.Expect) == 0 {
-		problems.Addf("%s: 没有任何期望命中（这条 query 在任何指标里都会恒为未召回）", where)
+		if group != GroupNoRel {
+			problems.Addf("%s: 没有任何期望命中（这条 query 在任何指标里都会恒为未召回）", where)
+		}
 		return
 	}
 

@@ -176,19 +176,28 @@ type StampChange struct {
 	NewChunks int
 }
 
+// HashChanged 表示这份语料的内容指纹变了。
+//
+// 单独暴露出来而不是让调用方自己比较：比较要记得大小写不敏感
+// （指纹是小写，但历史值可能是从别处抄来的大写），漏了会很隐蔽。
+func (c StampChange) HashChanged() bool {
+	return !strings.EqualFold(c.OldHash, c.NewHash)
+}
+
 // Info 返回一行人可读的变化摘要。
 func (c StampChange) Info() string {
-	hashChanged := !strings.EqualFold(c.OldHash, c.NewHash)
 	switch {
-	case hashChanged:
+	case c.HashChanged():
 		return fmt.Sprintf("%s\n    sha256 %s\n       →   %s\n    片段数 %d → %d",
 			c.Path, c.OldHash, c.NewHash, c.OldChunks, c.NewChunks)
 	case c.OldChunks == 0:
 		// 首次记录片段数：内容是没动的，别把它说成「内容变了」。
 		return fmt.Sprintf("%s\n    内容未变，补记片段数 %d", c.Path, c.NewChunks)
 	default:
-		// 内容没变而片段数变了，只可能是切分参数动过。
-		return fmt.Sprintf("%s\n    内容未变，但片段数 %d → %d（切分参数变了吗？）",
+		// 内容没变而片段数变了 → 动过的是切分逻辑或参数，不是语料。
+		// 这两种情况的后果完全不同（一个要查语料、一个要查代码），
+		// 所以提示要把话说满，别让人去翻语料。
+		return fmt.Sprintf("%s\n    内容未变，但片段数 %d → %d（改过切分逻辑或参数？）",
 			c.Path, c.OldChunks, c.NewChunks)
 	}
 }

@@ -26,9 +26,26 @@ const (
 
 	// DefaultCandidateMultiplier 是每路检索时的候选倍数。
 	//
-	// 融合前每路多取一些：只取 topK 的话，两路各自的第一名可能都不在
-	// 对方的候选里，融合后的结果会非常单薄。
-	DefaultCandidateMultiplier = 3
+	// # 为什么是 1（曾经是 3）
+	//
+	// 原始理由是「只取 topK 的话，两路各自的第一名可能都不在对方的候选里，
+	// 融合会非常单薄」。这个担心在**机制上**成立，但在**实测中被推翻**了：
+	//
+	//	候选倍数   融合 recall@10   （2026-09-12，43 条评测集）
+	//	   1          0.791
+	//	   2          0.721
+	//	   3          0.628   ← 旧默认
+	//	   4          0.651
+	//	   8          0.674
+	//
+	// 放大候选确实让融合"看得更多"，但多出来的大部分是弱通道的噪声，
+	// 而 RRF 按名次等权合并——噪声照样拿分，把强通道的相关结果挤下去。
+	// 降到 1 之后融合不再输给向量单路（0.791 vs 0.767）。
+	//
+	// 代价要一并说清：倍数=1 有一个**结构性盲区**——
+	// 一条排在向量第 15 名、词法第 25 名的结果，两路都不会把它送进融合。
+	// 只是在这份评测里，噪声的伤害大于这个盲区。详见 BENCHMARKS.md。
+	DefaultCandidateMultiplier = 1
 )
 
 // LexicalSearcher 是关键词检索的抽象。
@@ -122,9 +139,39 @@ func (h *Hybrid) WithErrorHandler(fn func(types.Retriever, error)) *Hybrid {
 //
 // topK <= 0 时使用 defaultTopK。
 func (h *Hybrid) Search(ctx context.Context, query string, queryVec []float32, topK int) ([]types.SearchResult, error) {
+	return h.search(ctx, query, queryVec, topK, true)
+}
+
+// SearchAll 与 Search 完全相同，但**不截断**融合结果。
+//
+// # 什么时候需要它
+//
+// 调用方要在融合之后再加工（比如 #50 的相邻片段合并），加工完才截断。
+//
+// # ⚠️ 不要用「传一个更大的 topK」来达到同样目的
+//
+// 那个做法看起来等价，实际上**会改变排名**：每路取回的候选数
+// `n = topK * mult` 会跟着变大，而 RRF 的排名**依赖候选池大小**——
+// 候选一多，弱通道的噪声就能压过强通道的相关结果（这正是 #44 测出来的）。
+//
+// 实测后果：开了相邻片段合并之后 recall 从 0.837 掉到 0.767，
+// 而 top-10 里换掉的是一整批不相干的结果，不是"少了几条冗余"。
+func (h *Hybrid) SearchAll(ctx context.Context, query string, queryVec []float32, topK int) ([]types.SearchResult, error) {
+	return h.search(ctx, query, queryVec, topK, false)
+}
+
+// search 是 Search / SearchAll 的共同实现。
+//
+// topK 决定**每路取多少候选**（n = topK * mult），truncate 决定
+// 融合结果要不要截断到 topK。两者分开，是因为它们的含义完全不同。
+func (h *Hybrid) search(ctx context.Context, query string, queryVec []float32, topK int, truncate bool) ([]types.SearchResult, error) {
 	const defaultTopK = 10
 	if topK <= 0 {
 		topK = defaultTopK
+	}
+	fuseK := topK
+	if !truncate {
+		fuseK = 0 // FuseRRF 的 0 表示不截断
 	}
 	n := topK * h.mult
 
@@ -176,14 +223,14 @@ func (h *Hybrid) Search(ctx context.Context, query string, queryVec []float32, t
 			if len(runs) == 0 {
 				return nil, ctx.Err()
 			}
-			return FuseRRF(h.k, topK, runs...), nil
+			return FuseRRF(h.k, fuseK, runs...), nil
 		}
 	}
 
 	if len(runs) == 0 {
 		return nil, fmt.Errorf("%w: %v", ErrBothRetrieversFailed, errors.Join(errs...))
 	}
-	return FuseRRF(h.k, topK, runs...), nil
+	return FuseRRF(h.k, fuseK, runs...), nil
 }
 
 func (h *Hybrid) reportError(r types.Retriever, err error) {

@@ -399,3 +399,154 @@ func (w *wrongDimEmbedder) Embed(_ context.Context, texts []string) ([][]float32
 	}
 	return out, nil
 }
+
+// ---- 文档去重（#55）----
+
+// docCount 数一数库里现在有几篇文档。
+func docCount(t *testing.T, st store.Store) int {
+	t.Helper()
+	docs, err := st.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(docs)
+}
+
+func TestIngestSameSourceSameContentReplaces(t *testing.T) {
+	// 冒烟测试跑两次、参数扫描反复重灌语料——都是"同一份东西导了又导"。
+	// 不去重的话库里会堆出一模一样的文档，检索时两条相同结果并排返回，
+	// Agent 无从分辨哪条是哪条。
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	mk := func() *types.Document {
+		return &types.Document{Title: "手册", Source: "docs/a.md", Content: longContent(10)}
+	}
+	if _, err := g.Ingest(ctx, mk()); err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	first, err := st.AllChunks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.Ingest(ctx, mk()); err != nil {
+		t.Fatalf("二次导入失败: %v", err)
+	}
+	if n := docCount(t, st); n != 1 {
+		t.Errorf("同一份内容导入两次，库里应当只有 1 篇文档，实际 %d 篇", n)
+	}
+
+	// ⚠️ 还要确认**旧片段真的被清掉了**，而不是新旧并存。
+	// 只数文档数是不够的：旧片段可能因为某种原因成了孤儿留在库里，
+	// 检索时照样会被召回来——而那正是去重想解决的问题。
+	after, err := st.AllChunks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(first) {
+		t.Errorf("片段数应当与首次一致（旧片段被替换而非并存）：首次 %d，现在 %d",
+			len(first), len(after))
+	}
+	seen := map[int64]bool{}
+	for _, c := range after {
+		if seen[c.ID] {
+			t.Errorf("片段 ID %d 重复出现", c.ID)
+		}
+		seen[c.ID] = true
+	}
+}
+
+func TestIngestSameSourceChangedContentUpdates(t *testing.T) {
+	// 同一个来源（文件路径）的内容变了 → **替换**，不是新增。
+	//
+	// 这条定的是语义：**来源是身份，标题只是元数据**。
+	// 如果按标题判身份，两个不同目录下的同名文件会互相顶掉；
+	// 如果按内容判身份，文件改了再导入会留下旧版本——
+	// 而用户明明是在更新它。
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	if _, err := g.Ingest(ctx, &types.Document{
+		Title: "手册", Source: "docs/a.md", Content: longContent(10),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Ingest(ctx, &types.Document{
+		Title: "手册（改了）", Source: "docs/a.md", Content: longContent(20),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := docCount(t, st); n != 1 {
+		t.Errorf("同一来源内容变了应当替换，库里应只有 1 篇，实际 %d 篇", n)
+	}
+	docs, _ := st.Documents(ctx)
+	if docs[0].Title != "手册（改了）" {
+		t.Errorf("标题应当跟着更新，实际 %q", docs[0].Title)
+	}
+}
+
+func TestIngestDifferentInlineDocsCoexist(t *testing.T) {
+	// 直接传文本时 source 都是 "inline"——**它不能当身份**，
+	// 否则两份完全不同的笔记会互相顶掉，只剩最后一份。
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	if _, err := g.Ingest(ctx, &types.Document{
+		Title: "笔记一", Source: types.InlineSource, Content: longContent(10),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Ingest(ctx, &types.Document{
+		Title: "笔记二", Source: types.InlineSource, Content: longContent(20),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := docCount(t, st); n != 2 {
+		t.Errorf("两份不同的 inline 文本应当是两篇文档，实际 %d 篇", n)
+	}
+}
+
+func TestIngestSameInlineContentDeduped(t *testing.T) {
+	// 反过来：内容一模一样的 inline 导入两次，仍然应当只有一份。
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := g.Ingest(ctx, &types.Document{
+			Title: "同样的笔记", Source: types.InlineSource, Content: longContent(10),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := docCount(t, st); n != 1 {
+		t.Errorf("同一份 inline 内容导入两次应只有 1 篇，实际 %d 篇", n)
+	}
+}
+
+func TestIngestFillsContentHashAndDedupKey(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	g := newTestIngester(t, st, nil)
+
+	doc := &types.Document{Title: "手册", Source: "docs/a.md", Content: longContent(10)}
+	if _, err := g.Ingest(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(doc.ContentHash) != 64 {
+		t.Errorf("内容指纹应当是 64 位十六进制 sha256，实际 %q", doc.ContentHash)
+	}
+	if doc.DedupKey != types.DedupKey("docs/a.md", doc.ContentHash) {
+		t.Errorf("去重键应当由 DedupKey() 算出，实际 %q", doc.DedupKey)
+	}
+	if !strings.HasPrefix(doc.DedupKey, "src:") {
+		t.Errorf("有真实来源时去重键应当以 src: 开头，实际 %q", doc.DedupKey)
+	}
+}

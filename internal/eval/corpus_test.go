@@ -110,3 +110,101 @@ func TestContentsRejectsUnknownFile(t *testing.T) {
 		t.Errorf("错误里应指出是哪个文件，实际:\n%v", err)
 	}
 }
+
+// ---- 语料状态（#56）----
+
+func TestDescribeCorpusMatchesChunkCount(t *testing.T) {
+	// 这个函数存在的全部意义是**可靠地预言评测会看到什么**。
+	// 它和评测器用了同一个切分器，所以两者的片段数必须一致——
+	// 不一致的话，CI 断言的数和实际跑的数对不上，而那种错最难查。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+
+	suite, err := Load(root)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+
+	st, err := DescribeCorpus(suite, Options{MaxRunes: 400, Overlap: 60})
+	if err != nil {
+		t.Fatalf("描述失败: %v", err)
+	}
+	if st.TotalChunks == 0 {
+		t.Fatal("应当切出片段")
+	}
+	if len(st.Files) != 1 || st.Files[0].Source != "doc.md" {
+		t.Errorf("应当报出每份语料的片段数，实际 %+v", st.Files)
+	}
+	// 指纹要一起报出来：片段数变了有两种可能（切分参数变了 / 语料变了），
+	// 只看片段数分不清，指纹能。
+	if st.Fingerprints["doc.md"] == "" {
+		t.Error("应当带上语料指纹")
+	}
+}
+
+func TestDescribeCorpusRespectsParams(t *testing.T) {
+	// 换切分参数，片段数必须跟着变——否则这个函数报的是一个
+	// 与参数无关的常数，而它正是用来"预言某组参数下的结果"的。
+	// 引文必须真的出现在语料里——校验会拦住不存在的引文，
+	// 而那是刻意的（错标的评测集比读不进来危险得多）。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q",
+			"expect":[{"source":"doc.md","quote":"这是一句用来撑长度","occurrence":1}]}`),
+	}, strings.Repeat("这是一句用来撑长度的中文内容。", 30))
+
+	suite, err := Load(root)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+
+	big, err := DescribeCorpus(suite, Options{MaxRunes: 400, Overlap: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	small, err := DescribeCorpus(suite, Options{MaxRunes: 80, Overlap: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 报告出来的参数也要跟得上——它是"这组数字是在什么参数下测的"的记录，
+	// 写死会让报告与实际结果对不上。
+	if big.MaxRunes != 400 || small.MaxRunes != 80 || small.Overlap != 20 {
+		t.Errorf("状态里应当带上实际用的参数：big=%d/%d small=%d/%d",
+			big.MaxRunes, big.Overlap, small.MaxRunes, small.Overlap)
+	}
+	if small.TotalChunks <= big.TotalChunks {
+		t.Errorf("切得更碎时片段数应当更多：400/60 得 %d，80/20 得 %d",
+			big.TotalChunks, small.TotalChunks)
+	}
+}
+
+func TestLoadRejectsChunkCountDrift(t *testing.T) {
+	// 清单里记的片段数与实际切分结果不符 → 报错。
+	//
+	// ⚠️ 这条守的不只是"清单写错了"。它顺手拦住了更要紧的一件事：
+	// **改了切分逻辑却没重打指纹**。那种情况下评测数字会悄悄变化，
+	// 而没有任何东西会提醒——#47 之后真实发生过一次
+	// （chunks_at_default 从 196 变成 203，过了很久才发现）。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+
+	// 把清单里的片段数改成错的。
+	manifest := filepath.Join(root, "eval", CorpusManifest)
+	raw, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := strings.Replace(string(raw), `"sha256"`, `"chunks_at_default": 999, "sha256"`, 1)
+	write(t, manifest, fixed)
+
+	_, err = Load(root)
+	if err == nil {
+		t.Fatal("片段数与清单不符应当报错")
+	}
+	for _, want := range []string{"doc.md", "999", "-stamp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("错误里应出现 %q（要告诉人怎么修），实际:\n%v", want, err)
+		}
+	}
+}

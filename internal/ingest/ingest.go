@@ -8,6 +8,8 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -33,6 +35,46 @@ type Result struct {
 	DocumentID  int64
 	ChunkCount  int
 	EmbeddedNum int // 成功生成了向量的片段数
+}
+
+// dedup 算好指纹与去重键；如果库里已有同一份，先把旧的删掉。
+//
+// # 替换语义：删掉重建，不是增量更新
+//
+// 旧文档连同它的全部片段一起删除（外键 ON DELETE CASCADE），
+// 然后走正常的插入流程。**新文档会拿到一个新的 ID**。
+//
+// 为什么不做原地增量更新：片段是按切分参数切出来的，
+// 而切分参数可能已经变了——保留旧片段的 ID 会让"新切出来的片段"
+// 和"旧片段"混在同一篇文档里，编号也接不上。删掉重建是唯一能保证
+// 「库里这份文档的片段与当前切分参数一致」的做法。
+//
+// 代价是 ID 会变。**调用方不该把 DocumentID 当作长期标识**——
+// 要稳定就用 source 或内容指纹。
+func (g *Ingester) dedup(ctx context.Context, doc *types.Document) error {
+	doc.ContentHash = sha256Hex(doc.Content)
+	doc.DedupKey = types.DedupKey(doc.Source, doc.ContentHash)
+
+	old, err := g.store.DocumentByDedupKey(ctx, doc.DedupKey)
+	if err != nil {
+		if errors.Is(err, store.ErrDocumentNotFound) {
+			return nil // 新文档，照常插入
+		}
+		// 查不动就**中止**，不能"当作没有"继续插入——
+		// 那会在查库出故障时静默产生重复文档，而故障恢复后谁也不知道。
+		return fmt.Errorf("ingest: 查重失败: %w", err)
+	}
+
+	if err := g.store.DeleteDocument(ctx, old.ID); err != nil {
+		return fmt.Errorf("ingest: 替换旧文档失败: %w", err)
+	}
+	return nil
+}
+
+// sha256Hex 返回内容的 sha256（十六进制小写）。
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 // Ingester 编排一次完整的文档导入。
@@ -61,6 +103,14 @@ func (g *Ingester) Ingest(ctx context.Context, doc *types.Document) (*Result, er
 		return nil, ErrNilDocument
 	}
 	if err := doc.Validate(); err != nil {
+		return nil, err
+	}
+
+	// ---- 0. 算指纹与去重键，命中就替换 ----
+	//
+	// 顺序上必须**最先做**：先落库再发现重复的话，库里已经多出一份了，
+	// 而且"删掉刚插的那份"和"删掉旧的那份"很难区分。
+	if err := g.dedup(ctx, doc); err != nil {
 		return nil, err
 	}
 

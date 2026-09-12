@@ -482,3 +482,64 @@ func TestFingerprintIgnoresNewlineStyle(t *testing.T) {
 		t.Error("LF 与 CR 的指纹应相同")
 	}
 }
+
+func TestNoRelGroupAllowsEmptyExpect(t *testing.T) {
+	// norel 组按定义就没有期望命中——它期望的是"没有结果"。
+	// 别的组为空则一定是漏标了，必须拦住。
+	root := setupTree(t, map[string]string{
+		"norel.json": `{
+			"version": 1, "group": "norel", "title": "无答案",
+			"queries": [{"id":"nr-001","query":"完全无关的问题","expect":[]}]
+		}`,
+	}, corpusDoc)
+
+	if _, err := Load(root); err != nil {
+		t.Fatalf("norel 组应当允许空的 expect，实际: %v", err)
+	}
+}
+
+func TestOtherGroupsRejectEmptyExpect(t *testing.T) {
+	// 反面：别的组为空会让那条查询在任何指标里恒为未召回，
+	// 悄悄拉低整体分数而没人知道。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"问题","expect":[]}`),
+	}, corpusDoc)
+
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("普通组不该允许空的 expect")
+	}
+	if !strings.Contains(err.Error(), "没有任何期望命中") {
+		t.Errorf("错误信息应说明原因，实际:\n%v", err)
+	}
+}
+
+func TestLoadRecordsQuerySetFingerprint(t *testing.T) {
+	// 可复现性（#58）要求报告里带上"这次跑的到底是哪份输入"。
+	// 只有语料指纹是不够的——评测集改了同样让数字不可比，
+	// 而它改起来比语料容易得多（加一条查询、改一个引文）。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+
+	suite, err := Load(root)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	set := suite.Sets[0]
+	if len(set.SHA256) != 64 {
+		t.Errorf("评测集指纹应当是 64 位十六进制，实际 %q", set.SHA256)
+	}
+
+	// 改一个字，指纹必须变——否则它记的不是内容。
+	root2 := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q2","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+	suite2, err := Load(root2)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if suite2.Sets[0].SHA256 == set.SHA256 {
+		t.Error("评测集内容变了，指纹应当跟着变")
+	}
+}

@@ -325,8 +325,12 @@ func TestNewRejectsBadConfig(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"OverlapRunes 为负", Config{MaxRunes: 100, OverlapRunes: -1}},
-		{"OverlapRunes 大于 MaxRunes", Config{MaxRunes: 100, OverlapRunes: 100}},
+		// ⚠️ 「OverlapRunes 为负」这条**被移除了**：负数是「未设置」的哨兵，
+		// 会回落成默认值，不再是一个错误。见 TestZeroConfigSemantics。
+		//
+		// 边界必须留着：overlap 等于 maxRunes 时起点不前进，会死循环。
+		{"OverlapRunes 等于 MaxRunes", Config{MaxRunes: 100, OverlapRunes: 100}},
+		{"OverlapRunes 大于 MaxRunes", Config{MaxRunes: 100, OverlapRunes: 101}},
 		{"MaxRunes 为负", Config{MaxRunes: -5}},
 	}
 	for _, tt := range tests {
@@ -338,12 +342,62 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	}
 }
 
-// TestZeroConfigUsesDefaults 验证零值 Config 等价于默认配置。
-func TestZeroConfigUsesDefaults(t *testing.T) {
-	a := newChunker(t, Config{})
-	b := newChunker(t, DefaultConfig())
-	if a.cfg != b.cfg {
-		t.Errorf("零值配置应等价于默认配置: %+v vs %+v", a.cfg, b.cfg)
+// TestZeroConfigSemantics 记录零值 Config 的语义。
+//
+// ⚠️ 这条测试**改过**，原来断言的是 `Config{} == DefaultConfig()`。
+//
+// 那个约定逼着 normalize 拿 0 当「未设置」的哨兵，代价是
+// `OverlapRunes: 0`（完全不重叠——一个合法且有用的配置）
+// 会被静默改成 60，**用户没有办法关掉重叠**。
+//
+// 违反的正是本项目自己写在 types.Chunk.Ordinal 上的规则：
+// 0 是合法值，就不能拿它当"未设置"的哨兵。
+//
+// 新语义：MaxRunes 用 0 表示未设置（0 本来就不合法），
+// OverlapRunes 用负数表示未设置，0 按字面解释。
+func TestZeroConfigSemantics(t *testing.T) {
+	c := newChunker(t, Config{})
+	if c.cfg.MaxRunes != DefaultMaxRunes {
+		t.Errorf("MaxRunes 应回落成默认值 %d，实际 %d", DefaultMaxRunes, c.cfg.MaxRunes)
+	}
+	if c.cfg.OverlapRunes != 0 {
+		t.Errorf("OverlapRunes 应保持 0（不重叠），实际 %d", c.cfg.OverlapRunes)
+	}
+
+	// 想要默认重叠，得显式取 DefaultConfig()。
+	if d := newChunker(t, DefaultConfig()); d.cfg.OverlapRunes != DefaultOverlapRunes {
+		t.Errorf("DefaultConfig 的 OverlapRunes 应为 %d，实际 %d",
+			DefaultOverlapRunes, d.cfg.OverlapRunes)
+	}
+
+	// 负数才是「未设置」。
+	if n := newChunker(t, Config{MaxRunes: 100, OverlapRunes: -1}); n.cfg.OverlapRunes != DefaultOverlapRunes {
+		t.Errorf("负的 OverlapRunes 应回落成默认值 %d，实际 %d",
+			DefaultOverlapRunes, n.cfg.OverlapRunes)
+	}
+}
+
+// TestOverlapZeroDisablesOverlap 守护「重叠可以真的设为 0」。
+//
+// 没有这条测试的话，normalize 里把 0 当哨兵的老行为回来了也不会有人发现——
+// 而它返回来之后，参数扫描里 Overlap=0 那一列会悄悄变成「Overlap=60」，
+// 报告照样打印，数字看着也正常。
+func TestOverlapZeroDisablesOverlap(t *testing.T) {
+	content := strings.Repeat("零重叠测试内容。", 60)
+
+	c := newChunker(t, Config{MaxRunes: 100, OverlapRunes: 0})
+	chunks := mustSplit(t, c, 1, content)
+
+	if len(chunks) < 2 {
+		t.Fatalf("应当切出多个片段，实际 %d 个", len(chunks))
+	}
+	for i := 1; i < len(chunks); i++ {
+		if chunks[i].StartOffset < chunks[i-1].EndOffset {
+			t.Errorf("第 %d 个片段与上一个重叠了：[%d,%d) 与 [%d,%d)——"+
+				"OverlapRunes=0 没有被遵守",
+				i, chunks[i-1].StartOffset, chunks[i-1].EndOffset,
+				chunks[i].StartOffset, chunks[i].EndOffset)
+		}
 	}
 }
 
@@ -458,4 +512,265 @@ func BenchmarkSplitChinese(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// ---- 保护区：围栏代码块与表格 ----
+
+// contentOf 把片段还原成原文，便于断言"整块有没有被保住"。
+func contentOf(t *testing.T, content string, c types.Chunk) string {
+	t.Helper()
+	r := []rune(content)
+	if c.EndOffset > len(r) {
+		t.Fatalf("片段偏移越界：[%d,%d)，原文长 %d", c.StartOffset, c.EndOffset, len(r))
+	}
+	return string(r[c.StartOffset:c.EndOffset])
+}
+
+// TestFencedBlockStaysWholeWhenItFits 守护「放得下的围栏块必须整体保留」。
+//
+// 这是 #47 的核心：一张架构图被切成几片之后，每一片都不成形，
+// 语义为空、向量是噪声，却会随机匹配到不相关的查询、占掉一个结果位。
+func TestFencedBlockStaysWholeWhenItFits(t *testing.T) {
+	block := "```text\n" +
+		"┌──────────────┐\n" +
+		"│  ContextDock │\n" +
+		"└──────────────┘\n" +
+		"```\n"
+	content := "前置说明文字，用来把围栏块推到片段中部。\n\n" + block + "\n后置说明文字。\n"
+
+	c := newChunker(t, Config{MaxRunes: 120, OverlapRunes: 20})
+	chunks := mustSplit(t, c, 1, content)
+
+	var found bool
+	for _, ch := range chunks {
+		if strings.Contains(contentOf(t, content, ch), block) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("放得下的围栏块应当被某个片段完整包含，实际切成了：")
+		for i, ch := range chunks {
+			t.Errorf("  片段 %d: %q", i, contentOf(t, content, ch))
+		}
+	}
+}
+
+// TestOversizedFencedBlockBreaksOnlyAtLineBoundaries 守护「超长围栏块退而求其次」。
+//
+// 块本身超过 MaxRunes 时物理上无法整体保留，此时**只能在行边界切**。
+// 从一行中间切开会让两个片段都从半行开始——那是可见的质量问题，
+// 而且它不报错。
+func TestOversizedFencedBlockBreaksOnlyAtLineBoundaries(t *testing.T) {
+	// 造一个远超上限的围栏块，每行长度不同，避免"恰好切在行首"的巧合。
+	var b strings.Builder
+	b.WriteString("```text\n")
+	for i := 0; i < 30; i++ {
+		b.WriteString(strings.Repeat("图", i%5+3))
+		b.WriteString(" 一段图表内容\n")
+	}
+	b.WriteString("```\n")
+	content := "开头。\n" + b.String() + "结尾。\n"
+
+	c := newChunker(t, Config{MaxRunes: 80, OverlapRunes: 10})
+	chunks := mustSplit(t, c, 1, content)
+
+	fenceStart := strings.Index(content, "```text")
+	r := []rune(content)
+	for i, ch := range chunks {
+		// 只查**结束**端点：那才是 cutPoint 决定的。
+		//
+		// ⚠️ 起点这里**不查**——起点由「结束位置减去重叠」得出，天然落在行中间。
+		// 那是 #48（重叠起点吸附行边界）的范围。混在一起查的话，
+		// 这条测试会在 #47 还没做完时就红，说不清是谁的问题。
+		pos := ch.EndOffset
+		if pos <= fenceStart || pos >= len(r) {
+			continue
+		}
+		if r[pos-1] == '\n' || r[pos] == '\n' {
+			continue // 行边界，合法
+		}
+		t.Errorf("片段 %d 的结束端点 %d 落在围栏块内的行中间：%q",
+			i, pos, contentOf(t, content, ch))
+	}
+}
+
+// TestTableRowsStayTogether 守护表格不被从中间切开。
+func TestTableRowsStayTogether(t *testing.T) {
+	table := "| 变量 | 默认值 | 说明 |\n" +
+		"| --- | --- | --- |\n" +
+		"| TOP_K | 10 | 返回条数 |\n" +
+		"| TIMEOUT | 5s | 检索超时 |\n"
+	content := "配置说明如下，请仔细阅读每一项的含义。\n\n" + table + "\n以上是全部配置。\n"
+
+	c := newChunker(t, Config{MaxRunes: 90, OverlapRunes: 10})
+	chunks := mustSplit(t, c, 1, content)
+
+	// 片段末尾的空白会被裁掉，所以比对时也要裁掉表格自己的尾随换行——
+	// 否则这条测试会因为"差一个 \n"而红，让人以为是切分的问题。
+	want := strings.TrimRight(table, "\n")
+
+	var found bool
+	for _, ch := range chunks {
+		if strings.Contains(contentOf(t, content, ch), want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("放得下的表格应当被某个片段完整包含，实际切成了：")
+		for i, ch := range chunks {
+			t.Errorf("  片段 %d: %q", i, contentOf(t, content, ch))
+		}
+	}
+}
+
+// TestFreestandingPipesAreNotTable 守护「≥3 行才算表格」那条阈值。
+//
+// 单独几行以 | 开头更可能是正文里恰好这么排版的内容（命令行管道、
+// 或一行 Markdown 示例）。把它们当表格保护起来，反而会把正常段落切碎。
+func TestFreestandingPipesAreNotTable(t *testing.T) {
+	content := "示例命令：\n" +
+		"cat a.txt | grep foo\n" +
+		"ls -la | wc -l\n" +
+		"\n" +
+		"继续正文，这一段很长很长要保证它会被切分。" +
+		strings.Repeat("补充内容。", 20) + "\n"
+
+	c := newChunker(t, Config{MaxRunes: 60, OverlapRunes: 10})
+	chunks := mustSplit(t, c, 1, content)
+	if len(chunks) < 3 {
+		t.Fatalf("这段内容应当被切成多个片段，实际 %d 个", len(chunks))
+	}
+	// 关键断言：保护逻辑不该吞掉任何内容。
+	//
+	// ⚠️ 不能断言「最后一个片段的 EndOffset == 原文长度」——
+	// 末尾空白本来就会被裁掉，那是既有行为。要查的是**非空白字符**全覆盖。
+	runes := []rune(content)
+	covered := make([]bool, len(runes))
+	for _, ch := range chunks {
+		for i := ch.StartOffset; i < ch.EndOffset; i++ {
+			covered[i] = true
+		}
+	}
+	for i, r := range runes {
+		if !isSpace(r) && !covered[i] {
+			t.Errorf("第 %d 个字符 %q 没有被任何片段覆盖（丢内容了）", i, r)
+		}
+	}
+}
+
+// TestChunkAlwaysAdvances 守护「切分必须严格前进」。
+//
+// ⚠️ 这条测试来自一次真实事故：第一版保护区实现允许把切分点退到「任何
+// region.start > pos」的位置，而下一片的起点是 end-overlap——
+// 于是退到块首之后又退回到块首之前，两次调用算出同一个 end，
+// 切分原地打转，全靠 `next = pos + 1` 兜底一个字符一个字符地挪。
+//
+// 症状是片段数暴涨（实测 196 → 313）而**不报任何错**，
+// 表现成「改了切分之后检索变差」——根因在切分空转，不在检索。
+func TestChunkAlwaysAdvances(t *testing.T) {
+	// 一段"保护区紧贴着起点"的内容：块首离 pos 很近，
+	// 退到块首会让本片几乎不前进。
+	content := strings.Repeat("字", 30) + "\n" +
+		"```text\n" + strings.Repeat("图", 300) + "\n```\n" +
+		strings.Repeat("文", 200) + "\n"
+
+	for _, cfg := range []Config{
+		{MaxRunes: 100, OverlapRunes: 20},
+		{MaxRunes: 100, OverlapRunes: 0},
+		{MaxRunes: 400, OverlapRunes: 60},
+	} {
+		c := newChunker(t, cfg)
+		chunks := mustSplit(t, c, 1, content)
+
+		// 片段数不该远多于 content/MaxRunes——远超就说明在空转。
+		runes := len([]rune(content))
+		maxReasonable := runes/(cfg.MaxRunes-cfg.OverlapRunes) + 8
+		if len(chunks) > maxReasonable {
+			t.Errorf("cfg=%+v：切出 %d 个片段，内容 %d 字符、理论上限约 %d 个——切分在空转",
+				cfg, len(chunks), runes, maxReasonable)
+		}
+		// 每个片段都必须真的覆盖一段内容。
+		for i, ch := range chunks {
+			if ch.EndOffset <= ch.StartOffset {
+				t.Errorf("cfg=%+v：片段 %d 长度为 0", cfg, i)
+			}
+		}
+	}
+}
+
+// ---- 重叠起点吸附行边界（#48）----
+
+// ---- 重叠起点（#48：试过行边界吸附，实测有害，已回退）----
+//
+// 这里**故意没有**「片段必须从行首开始」这条断言。理由写在 chunker.go
+// 的对应位置和 BENCHMARKS.md 里：两种吸附方向各跑 4 组切分参数，
+// 没有一次比「盲退固定字符数」更好。
+//
+// 顺手记下这条**已知限制**：片段确实可能从半行开始
+// （实测能见到以 "───────────┘" 开头的片段）。
+// 它是可读性问题，不影响答案能不能被取到——而修它的两种尝试都伤了召回。
+
+// TestOverlapNeverExceedsConfigured 守护「实际重叠不长于配置值」。
+//
+// 吸附的方向必须是**向后**（朝文末）找行首。向前找会让重叠比配置值更长，
+// 而 OverlapRunes 这个数是按索引成本定下来的——重叠悄悄变长意味着
+// 索引体积悄悄膨胀，报告上看不出来。
+func TestOverlapNeverExceedsConfigured(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 80; i++ {
+		b.WriteString("这一段有内容。\n")
+	}
+	content := b.String()
+
+	const overlap = 25
+	c := newChunker(t, Config{MaxRunes: 90, OverlapRunes: overlap})
+	chunks := mustSplit(t, c, 1, content)
+
+	for i := 0; i+1 < len(chunks); i++ {
+		got := chunks[i].EndOffset - chunks[i+1].StartOffset
+		if got > overlap {
+			t.Errorf("片段 %d → %d 的实际重叠 %d 超过配置的 %d",
+				i, i+1, got, overlap)
+		}
+	}
+}
+
+// TestOverlapOnSingleLongLine 守护「没有换行的超长文本照样切得动」。
+//
+// 整篇只有一行时，任何按行对齐的设想都无从谈起。这时不能硬猜位置，
+// 只能按固定字符数回退——片段会从半行开始，但那是物理上无法避免的，
+// 关键是不丢内容、不死循环。
+func TestOverlapOnSingleLongLine(t *testing.T) {
+	// 无换行的长文本：整篇只有一行。
+	content := strings.Repeat("没有任何换行的超长文本内容", 40)
+
+	c := newChunker(t, Config{MaxRunes: 100, OverlapRunes: 30})
+	chunks := mustSplit(t, c, 1, content)
+
+	if len(chunks) < 5 {
+		t.Fatalf("应当切出多段，实际 %d 段", len(chunks))
+	}
+	// 覆盖性不能丢——退化路径不该吞掉内容。
+	runes := []rune(content)
+	covered := make([]bool, len(runes))
+	for _, ch := range chunks {
+		for i := ch.StartOffset; i < ch.EndOffset; i++ {
+			covered[i] = true
+		}
+	}
+	for i := range runes {
+		if !covered[i] {
+			t.Fatalf("第 %d 个字符没有被覆盖（退化路径吞了内容）", i)
+		}
+	}
+}
+
+// firstN 截取前 n 个字符，用于报错信息。按 rune 截，别把汉字切成半个。
+func firstN(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

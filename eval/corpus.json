@@ -23,7 +23,7 @@
       "sha256": "9c7371776362c10519156326b406ddbb118dc7f67cdd5c6f8bf28fa74d78eaaa",
       "origin": "本仓库 docs/PITFALLS.md 的快照，取自 v1.0.0 发布后的 main",
       "why": "大量短条目 + 表格 + 错误码与命令行片段。是精确 token 子集（错误码、环境变量名、SQL 片段）的主要取材地。",
-      "chunks_at_default": 33
+      "chunks_at_default": 35
     },
     {
       "source": "rust-book-zh-testing.md",
@@ -31,7 +31,7 @@
       "sha256": "bd390be4e661e1f04fd790ef619712de2fc1105b121226c1b789b00ff1ea31b3",
       "origin": "《Rust 程序设计语言》中文版 11.1「如何编写测试」，来自 github.com/rust-lang-cn/book-cn，固定于 commit cde74c448e301ce8ac7960a0d3dc879efd83635d，许可 Apache-2.0",
       "why": "外部语料，规模比本仓库文档大一个量级，用来把候选池拉开——候选太少时 recall@10 几乎必中，参数扫描的区分度会被压缩到看不出来。中文散文 + 英文代码块，正好匹配中英混合分词场景。",
-      "chunks_at_default": 60
+      "chunks_at_default": 63
     },
     {
       "source": "rust-book-zh-errors.md",
@@ -39,7 +39,7 @@
       "sha256": "054f6747418cece9d2102d1bdc557b997c9be633d9fc70431b1928ae8cf9dc3e",
       "origin": "《Rust 程序设计语言》中文版 9.2「用 Result 处理可恢复的错误」，来自 github.com/rust-lang-cn/book-cn，固定于 commit cde74c448e301ce8ac7960a0d3dc879efd83635d，许可 Apache-2.0",
       "why": "与上一份同源但主题不同：这一份围绕错误类型展开，术语高度集中在 unwrap / expect / panic / ? 运算符上。同源主题差异明显的两份，能暴露「向量通道把同文档不同章节混为一谈」的问题。",
-      "chunks_at_default": 38
+      "chunks_at_default": 40
     }
   ]
 }

@@ -10,14 +10,73 @@ import (
 	"unicode"
 )
 
+// Scheme 是 CJK 部分的分词方案。
+//
+// 拉丁字母部分在任何方案下都一样（按词切分 + 转小写）——那些语言有空格，
+// 没有选择的余地。有争议的从来只有中文怎么切。
+type Scheme string
+
+const (
+	// SchemeBigram 只产出字符 bigram。这是 v1.0.0 的默认，也是 DESIGN §3 的选型。
+	SchemeBigram Scheme = "bigram"
+
+	// SchemeUnigram 只产出单字。
+	//
+	// 它是最朴素的方案：召回几乎必然更高（每个字都成了检索点），
+	// 代价是区分度低——常用字（的、是、在）到处都是，
+	// 一条查询会撞上大量不相关的片段。
+	SchemeUnigram Scheme = "unigram"
+
+	// SchemeBoth 单字和 bigram 都产出。
+	//
+	// 直觉上「两个都要」应当最好，但它的词典会大一倍，
+	// BM25 的长度归一化也会被单字的数量撑大。到底如何，由 #45 的实测说了算。
+	SchemeBoth Scheme = "both"
+)
+
+// AllSchemes 是全部合法方案，顺序即报告里的展示顺序。
+var AllSchemes = []Scheme{SchemeBigram, SchemeUnigram, SchemeBoth}
+
+// Valid 判断是不是已知方案。
+func (s Scheme) Valid() bool {
+	for _, x := range AllSchemes {
+		if s == x {
+			return true
+		}
+	}
+	return false
+}
+
 // Tokenizer 是无状态的，可以安全地被多个 goroutine 并发调用。
 //
-// 之所以做成结构体而不是裸函数：将来若要加入可配置项（比如是否输出
-// unigram、自定义停用词表），可以在不破坏调用方代码的前提下扩展。
-type Tokenizer struct{}
+// 之所以做成结构体而不是裸函数：为可配置项留位置。
+// #45 的对比实验正是靠这个扩展点做的，没有改动任何调用方的签名。
+type Tokenizer struct {
+	scheme Scheme
+}
 
-// New 创建一个分词器。
-func New() *Tokenizer { return &Tokenizer{} }
+// New 创建一个使用默认方案（bigram）的分词器。
+func New() *Tokenizer { return &Tokenizer{scheme: SchemeBigram} }
+
+// NewWith 创建一个指定方案的分词器。
+//
+// 方案不合法或为空时**回落成 bigram**，而不是报错或返回空结果：
+// 分词器是 BM25 的构造依赖，在这里报错会让整条检索链路起不来；
+// 而"切不出 token"这种失效方式更糟——它不报错，只是什么都搜不到。
+func NewWith(s Scheme) *Tokenizer {
+	if !s.Valid() {
+		s = SchemeBigram
+	}
+	return &Tokenizer{scheme: s}
+}
+
+// Scheme 返回当前方案。
+func (t *Tokenizer) Scheme() Scheme {
+	if t.scheme == "" {
+		return SchemeBigram
+	}
+	return t.scheme
+}
 
 // Tokenize 把文本切成 token 序列。
 //
@@ -70,9 +129,21 @@ func (t *Tokenizer) Tokenize(s string) []string {
 			// （比如文档里有"库"，用户搜"库"）
 			out = append(out, string(cjk))
 		default:
-			// 长度 n 的 CJK 段产出 n-1 个 bigram。
-			for i := 0; i+1 < len(cjk); i++ {
-				out = append(out, string(cjk[i:i+2]))
+			// 长度 n 的 CJK 段：unigram 出 n 个，bigram 出 n-1 个。
+			//
+			// 两段的顺序是**先单字后 bigram**，这是刻意的：
+			// 同一条查询里 token 的顺序会影响人读日志和调试时的直觉
+			// （"[检 索 检索]" 比 "[检索 检 索]" 更容易看出切法）。
+			// BM25 本身不看顺序，所以这纯粹是可读性考虑。
+			if t.Scheme() != SchemeBigram {
+				for _, r := range cjk {
+					out = append(out, string(r))
+				}
+			}
+			if t.Scheme() != SchemeUnigram {
+				for i := 0; i+1 < len(cjk); i++ {
+					out = append(out, string(cjk[i:i+2]))
+				}
 			}
 		}
 		cjk = cjk[:0]

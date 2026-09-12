@@ -40,6 +40,17 @@ const (
 	// 如果它们靠向量也能全中，说明向量通道没有在区分近似 token，那本身是个信号。
 	GroupToken Group = "token"
 
+	// GroupNoRel 是**语料里根本没有答案**的查询。
+	//
+	// 它的用途和别的组完全不同：别的组量「找得准不准」，
+	// 它量「**找不到的时候，分数长什么样**」——这是相关性阈值（#53）
+	// 唯一的实验依据。
+	//
+	// 所以这一组的 `expect` 允许为空，而且通常就是空的：
+	// 它期望的结果是**没有结果**，而不是某一条。
+	// 返回的每一条都按定义不相关，正好构成"纯噪声"的分数分布。
+	GroupNoRel Group = "norel"
+
 	// GroupSynonym 是同义改写——与目标原文**不共享任何字面 token**。
 	//
 	// 这是词法通道的瞎区：问「怎么让程序跑得快」，文档里写的是「性能优化」，
@@ -52,7 +63,7 @@ const (
 // 刻意用切片而不是 map：报告要按固定顺序输出才能逐次比对，
 // 而 map 的遍历顺序是随机的——那会让「同一输入得到同一份输出」这条
 // 可复现性要求（#58）直接失效。
-var AllGroups = []Group{GroupZH, GroupEN, GroupToken, GroupSynonym}
+var AllGroups = []Group{GroupZH, GroupEN, GroupToken, GroupSynonym, GroupNoRel}
 
 // Valid 判断是不是已知子集。
 func (g Group) Valid() bool {
@@ -173,10 +184,12 @@ type Query struct {
 	// Kind 是提问方式，可省略。省略时不参与分类统计，但 query 仍然计入总分。
 	Kind Kind `json:"kind,omitempty"`
 
-	// Expect 是期望命中，**至少一条**。
+	// Expect 是期望命中。
 	//
-	// 允许为空在格式上无害，但会让这条 query 在任何指标里都恒为「没召回」，
-	// 从而静默拉低整体分数——所以校验时直接当错误拦掉。
+	// 除了 `norel` 组，其余组**至少一条**：为空会让这条 query 在任何指标里
+	// 都恒为「没召回」，从而静默拉低整体分数——所以校验时按错误拦掉。
+	//
+	// `norel` 组按定义就是空的：它期望的是"没有结果"。
 	Expect []Expect `json:"expect"`
 
 	// RequireLexical 表示这条查询**必须由词法通道命中才算通过**。
@@ -213,4 +226,10 @@ type QuerySet struct {
 
 	// Queries 是子集内的全部查询。
 	Queries []Query `json:"queries"`
+
+	// SHA256 是**文件内容**的指纹，由加载器填充，用于可复现性（#58）。
+	//
+	// 记它而不只记查询条数：条数相同、内容不同的两份评测集，
+	// 跑出来的数字差别可能很大——而报告上只写着"51 条"，看不出区别。
+	SHA256 string `json:"sha256,omitempty"`
 }

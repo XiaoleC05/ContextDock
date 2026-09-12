@@ -110,6 +110,21 @@ var mutations = []mutation{
 	}`,
 	},
 
+	{
+		// 切到某方案时其实没切换：两组数据一模一样，
+		// 然后被当成「方案没影响」——而那是实验做废了，不是结论。
+		name: "tokenize: unigram/both 方案不产出单字",
+		file: "internal/tokenize/tokenizer.go",
+		old:  `if t.Scheme() != SchemeBigram {`,
+		new:  `if false {`,
+	},
+	{
+		name: "tokenize: unigram 方案也产出 bigram",
+		file: "internal/tokenize/tokenizer.go",
+		old:  `if t.Scheme() != SchemeUnigram {`,
+		new:  `if true {`,
+	},
+
 	// ---- chunk ----
 	// 这条对应开发时真实踩到的 bug：hitEnd 在去空白之前算，
 	// 改成 false 后短段落会退化成一个字符一段。
@@ -154,12 +169,40 @@ var mutations = []mutation{
 		new:  `if false {`,
 	},
 	{
+		// 切分点不再优先落在句末标点：一句话会被从中间劈开，
+		// 两个片段都变得语义不完整。
 		name: "chunk: 不在句末标点断开",
 		file: "internal/chunk/chunker.go",
-		old: `} else if brk := lastSentenceBreak(runes, pos, end); brk > pos {
-			end = brk
-		}`,
-		new: `}`,
+		old:  `cut := lastSentenceBreak(runes, pos, limit)`,
+		new:  `cut := limit`,
+	},
+
+	{
+		// 切分点退得太靠近起点 → 下一片只前进一个字符，
+		// 一段文字被切成几十个碎片（实测 545 字符切出 27 片）而不报错。
+		name: "chunk: 断点不设最小前进距离（切分空转）",
+		file: "internal/chunk/chunker.go",
+		old:  `if cut <= minEnd {`,
+		new:  `if false {`,
+	},
+	{
+		// 在保护区起点结束时仍然回退重叠：起点被拉回块前，
+		// 刚保护好的整块又放不进下一片的窗口里。
+		name: "chunk: 在保护区起点结束时仍回退重叠",
+		file: "internal/chunk/chunker.go",
+		old:  `if _, ok := regionStartingAt(prot, cutBeforeTrim); ok {`,
+		new:  `if _, ok := regionStartingAt(prot, cutBeforeTrim); false && ok {`,
+	},
+
+	{
+		// ⚠️ 这条对应一个**真实存在过的 bug**：0 被当成「未设置」的哨兵，
+		// 于是 OverlapRunes=0（完全不重叠，一个合法配置）会被静默改成 60，
+		// 用户根本没有办法关掉重叠。
+		// 违反的是本项目自己写在 types.Chunk.Ordinal 上的规则。
+		name: "chunk: OverlapRunes=0 被当成未设置（真实缺陷）",
+		file: "internal/chunk/chunker.go",
+		old:  `if c.OverlapRunes < 0 {`,
+		new:  `if c.OverlapRunes <= 0 {`,
 	},
 
 	// ---- embed ----
@@ -418,6 +461,347 @@ var mutations = []mutation{
 		file: "internal/eval/load.go",
 		old:  `e.Grade = GradeFull`,
 		new:  `e.Grade = GradePartial`,
+	},
+
+	{
+		// 有结果时不说明分数的局限：Agent 手上没有任何信号，
+		// 会把一堆可能完全不相关的结果当成答案照单全收。
+		name: "mcp: 有结果时不说明分数判断不了相关性",
+		file: "internal/mcp/server.go",
+		old:  `			out.Hint = scoreNote`,
+		new:  `			out.Hint = ""`,
+	},
+	{
+		// 不暴露原始分：Agent 手上只剩一个完全无法判断相关性的数字
+		// （实测无答案时的最高 RRF 分与真正命中时完全相同）。
+		name: "mcp: 结果不带原始分",
+		file: "internal/mcp/server.go",
+		old:  `		VectorScore:  r.VectorScore,`,
+		new:  `		VectorScore:  0,`,
+	},
+
+	// ---- 分数分布（#52）----
+	{
+		// 把 norel 组的结果混进「不相关」桶：阈值要挡的是"库里根本没答案"，
+		// 混进来会把"查得到但没排好"误当成"查不到"，阈值随之定得过高。
+		name: "eval: norel 组的结果没单独分桶",
+		file: "internal/eval/run.go",
+		old:  `noRel := group == GroupNoRel`,
+		new:  `noRel := false`,
+	},
+	{
+		// norel 组按定义没有期望命中。恢复"必须非空"的校验，
+		// 这一组就再也建不出来——而它是 #52 唯一的实验依据。
+		name: "eval: 要求所有组都有期望命中",
+		file: "internal/eval/load.go",
+		old:  `		if group != GroupNoRel {`,
+		new:  `		if true {`,
+	},
+	{
+		name: "eval: 分数分位数算错一位",
+		file: "internal/eval/metrics.go",
+		old:  `		i := int(math.Ceil(p/100*float64(len(s)))) - 1`,
+		new:  `		i := int(math.Ceil(p/100*float64(len(s))))`,
+	},
+	{
+		name: "eval: 算分数分位数时就地排序了输入",
+		file: "internal/eval/metrics.go",
+		old:  `	s := append([]float64(nil), vs...)`,
+		new:  `	s := vs`,
+	},
+
+	{
+		// 报告里写死切分参数：那一行是"这组数字是在什么参数下测的"的记录，
+		// 写死之后报告与实际结果对不上，而 CI 会拿报告当断言基准。
+		name: "eval: 语料状态报死的切分参数不是实际的",
+		file: "internal/eval/corpus_state.go",
+		old: `		MaxRunes:     opt.MaxRunes,
+		Overlap:      opt.Overlap,`,
+		new: `		MaxRunes:     400,
+		Overlap:      60,`,
+	},
+	{
+		// 重新读磁盘文件而不是用 suite 里的文本：两条路径的换行归一化
+		// 一旦不一致，报出来的片段数就和评测对不上。
+		name: "eval: 语料状态从磁盘重读而非用已归一化的文本",
+		file: "internal/eval/corpus_state.go",
+		old:  `		text, ok := suite.Content(f.Source)`,
+		new:  `		text, ok := "", false`,
+	},
+
+	{
+		// 不记评测集指纹：报告里只有语料指纹，而"这次跑的是哪份评测集"
+		// 同样决定了数字可不可比——评测集改起来比语料容易得多。
+		name: "eval: 不记评测集指纹",
+		file: "internal/eval/load.go",
+		old:  `		set.SHA256 = Fingerprint(string(raw))`,
+		new:  `		set.SHA256 = ""`,
+	},
+
+	// ---- 质量门禁（#57）----
+	{
+		// 门禁永不报警：指标掉多少都放过去，等于没有门禁。
+		name: "gate: 指标大幅下降也不报警",
+		file: "internal/eval/gate.go",
+		old:  `		if want-got > tolerance {`,
+		new:  `		if false {`,
+	},
+	{
+		// 门禁对任何波动都报警：每次提交都红，最后会被人关掉。
+		name: "gate: 指标没掉也报警",
+		file: "internal/eval/gate.go",
+		old:  `		if want-got > tolerance {`,
+		new:  `		if true {`,
+	},
+	{
+		// 不排序：map 遍历顺序随机，同一份数据两次跑报出不同的第一项，
+		// 对比输出时会以为改了东西。
+		name: "gate: 报错顺序不确定（不排序）",
+		file: "internal/eval/gate.go",
+		// 用「永远不交换」的排序代替真排序：保留 map 的随机遍历顺序，
+		// 而 sort 包仍然被引用（换成 `_ = keys` 会编译不过，变异会被判 BROKEN）。
+		old: `	sort.Strings(keys)`,
+		new: `sort.Slice(keys, func(i, j int) bool { return false })`,
+	},
+	{
+		// 缺指标时静默跳过：那条指标**再也不设防**了，而门禁看起来一切正常。
+		name: "gate: 基线里有而本次没有的指标被静默跳过",
+		file: "internal/eval/gate.go",
+		old: `		got, ok := cur.Metrics[k]
+		if !ok {`,
+		new: `		got, ok := cur.Metrics[k]
+		if false {`,
+	},
+	{
+		// 不核对片段数：改了切分逻辑却不重打指纹，评测数字会悄悄变化
+		// 而没有任何提醒。
+		name: "eval: 不核对语料片段数与清单是否一致",
+		file: "internal/eval/load.go",
+		old:  `		if got != f.ChunksAtDefault {`,
+		new:  `		if false {`,
+	},
+
+	// ---- 文档去重（#55）----
+	{
+		// 命中重复后不删旧的：库里变成两份，检索时两条一模一样的结果
+		// 并排返回，用户/Agent 无从分辨。
+		name: "ingest: 命中重复时不删旧文档",
+		file: "internal/ingest/ingest.go",
+		old: `	if err := g.store.DeleteDocument(ctx, old.ID); err != nil {
+		return fmt.Errorf("ingest: 替换旧文档失败: %w", err)
+	}`,
+		new: `	_ = old.ID
+	if err := error(nil); err != nil {
+		return fmt.Errorf("ingest: 替换旧文档失败: %w", err)
+	}`,
+	},
+	{
+		// 一律按内容指纹判身份：文件改了再导入会变成**两份文档**，
+		// 旧版本一直留在库里——而用户明明是在更新它。
+		name: "types: 去重键一律用内容指纹（不用来源）",
+		file: "internal/types/document.go",
+		old:  `	if source != "" && source != InlineSource {`,
+		new:  `	if false {`,
+	},
+	{
+		// 一律按来源判身份：直接传文本时 source 都是 "inline"，
+		// 两份完全不同的笔记会互相顶掉，只剩最后一份。
+		name: "types: 去重键一律用来源（inline 会互相顶掉）",
+		file: "internal/types/document.go",
+		old:  `	if source != "" && source != InlineSource {`,
+		new:  `	if true {`,
+	},
+	{
+		name: "ingest: 不算内容指纹",
+		file: "internal/ingest/ingest.go",
+		old:  `	sum := sha256.Sum256([]byte(s))`,
+		new:  `	sum := sha256.Sum256(nil)`,
+	},
+
+	// ---- 相邻片段合并（#50）----
+	{
+		// 序号不相邻也合并：会把"中间没被命中的内容"一并包进来，
+		// 造出一段原文里并不连续的正文。
+		name: "merge: 序号不相邻也合并",
+		file: "internal/retrieve/merge.go",
+		old:  `results[idxs[j]].Chunk.Ordinal == results[idxs[j-1]].Chunk.Ordinal+1`,
+		new:  `results[idxs[j]].Chunk.Ordinal == results[idxs[j-1]].Chunk.Ordinal`,
+	},
+	{
+		// 合并后取序号最小的那条当代表，而不是名次最好的那条：
+		// 合并结果整体后移，把本可以露出的别的文档又挤回去。
+		name: "merge: 代表取序号最小而非名次最好",
+		file: "internal/retrieve/merge.go",
+		old: `if k < head {
+					head = k
+				}`,
+		new: `if false {
+					head = k
+				}`,
+	},
+	{
+		// 拼接时不去掉重叠：正文里会出现重复段落，
+		// 而且它不再等于原文的 [start,end)——那条不变量一破，
+		// 上下文扩展和「重新切分对齐」都会错位。
+		name: "merge: 拼接正文时不去掉重叠",
+		file: "internal/retrieve/merge.go",
+		old:  `skip := prevEnd - c.StartOffset`,
+		new:  `skip := 0`,
+	},
+	{
+		// 不按文档分组：不同文档的片段也会被合并，
+		// 造出一段横跨两份文档、原文里根本不存在的正文。
+		//
+		// 用 Chunk.ID 代替 DocumentID：在测试里片段 ID 都没设（全是 0），
+		// 于是所有结果落进同一组、跨文档合并真的会发生。
+		name: "merge: 跨文档合并",
+		file: "internal/retrieve/merge.go",
+		old:  `groups[r.Chunk.DocumentID] = append(groups[r.Chunk.DocumentID], i)`,
+		new:  `groups[r.Chunk.ID] = append(groups[r.Chunk.ID], i)`,
+	},
+	{
+		// ⚠️ 这条对应一个**真实踩过的坑**：为了让合并有截断空间而给
+		// Search 传更大的 topK，会连带放大每路的候选数，改变 RRF 排名。
+		// 实测 recall 掉 7 个百分点。
+		name: "hybrid: SearchAll 也截断（合并失去腾挪空间）",
+		file: "internal/retrieve/hybrid.go",
+		old:  `	return h.search(ctx, query, queryVec, topK, false)`,
+		new:  `	return h.search(ctx, query, queryVec, topK, true)`,
+	},
+	{
+		name: "hybrid: 不截断时仍按 topK 融合",
+		file: "internal/retrieve/hybrid.go",
+		old:  `		fuseK = 0 // FuseRRF 的 0 表示不截断`,
+		new:  `		fuseK = topK`,
+	},
+
+	// ---- 上下文扩展（#49）----
+	{
+		// 前一段取头部：给 Agent 看一段它根本接不上的话，比不给还糟。
+		name: "mcp: context_before 取了前一段的头部",
+		file: "internal/mcp/server.go",
+		old:  `item.ContextBefore = tailRunes(prev[n-1].Content, contextSnippetRunes)`,
+		new:  `item.ContextBefore = headRunes(prev[n-1].Content, contextSnippetRunes)`,
+	},
+	{
+		name: "mcp: context_after 取了后一段的尾部",
+		file: "internal/mcp/server.go",
+		old:  `item.ContextAfter = headRunes(next[0].Content, contextSnippetRunes)`,
+		new:  `item.ContextAfter = tailRunes(next[0].Content, contextSnippetRunes)`,
+	},
+	{
+		// 按字节截断：中文会被切成半个、输出乱码，而且不报错。
+		name: "mcp: 上下文摘要按字节截断",
+		file: "internal/mcp/server.go",
+		old:  `return string(r[:n]) + "…"`,
+		new:  `return s[:n] + "…"`,
+	},
+	{
+		// 找不到自己时瞎猜一个位置：会把别的片段的正文当成"上下文"贴上去，
+		// 而 Agent 无从分辨。
+		name: "service: 取邻居时找不到自己也不返回空",
+		file: "internal/service/neighbors.go",
+		old:  `if i >= len(doc) || doc[i].Ordinal != c.Ordinal {`,
+		new:  `if false {`,
+	},
+
+	// ---- eval 指标 ----
+	// 下面这几条都属于同一类：**不报错，只是数字变好看**。
+	// 指标算错了评测照样跑完、照样打印一张像模像样的表格，
+	// 而所有基于它的结论都是错的。这类变异正是变异测试存在的理由。
+	{
+		// 没有来源的期望一律不命中。手搓 Expect 时 source 是空的，
+		// 而空来源会与同样没有 source 元数据的片段"相等"，
+		// 于是零值区间被当成压在文档开头，所有查询都轻松命中。
+		name: "eval: 命中判定不防「没有来源的期望」",
+		file: "internal/eval/metrics.go",
+		old:  `if e.Source == "" {`,
+		new:  `if false {`,
+	},
+	{
+		// 不校验来源：区间相同但出自另一份语料也算命中，recall 虚高。
+		name: "eval: 命中判定不校验来源语料",
+		file: "internal/eval/metrics.go",
+		old:  `if r.Chunk.Metadata[types.MetadataKeySource] != e.Source {`,
+		new:  `if false {`,
+	},
+	{
+		// recall 的分母写错：多跳查询只命中一半会被算成 1，高估多跳场景。
+		name: "eval: recall 分母写错（多跳只命中一半算满分）",
+		file: "internal/eval/metrics.go",
+		old:  `sc.Recall = float64(len(sc.Matched)) / float64(sc.Total)`,
+		new:  `sc.Recall = float64(len(sc.Matched))`,
+	},
+	{
+		// 分级失效：部分相关与完全回答拿到同样的增益。
+		name: "eval: NDCG 增益忽略相关性分级",
+		file: "internal/eval/metrics.go",
+		old:  `return math.Pow(2, float64(e.Grade)) - 1`,
+		new:  `return 1`,
+	},
+	{
+		// 同一片段压住两条期望时重复计分，NDCG 会超过 1。
+		name: "eval: 同一片段的增益被重复计入",
+		file: "internal/eval/metrics.go",
+		old:  `if matched[i] || !covers(r, expects[i]) {`,
+		new:  `if !covers(r, expects[i]) {`,
+	},
+	{
+		name: "eval: NDCG 不按截断位置截断",
+		file: "internal/eval/metrics.go",
+		old:  `if rank <= ndcgK {`,
+		new:  `if true {`,
+	},
+
+	// ---- 嵌入缓存 ----
+	{
+		// 分位数算错一位：P95 报出来的是别的值。看这个数的人
+		// 想知道的恰恰是"最慢的那几次有多慢"，报错了他也看不出来。
+		name: "eval: 延迟分位数算错一位",
+		file: "internal/eval/run.go",
+		old:  `i := int(math.Ceil(p/100*float64(len(s)))) - 1`,
+		new:  `i := int(math.Ceil(p/100*float64(len(s))))`,
+	},
+	{
+		// 分位数就地排序：把调用方的切片改掉了，后续用它的顺序全乱。
+		name: "eval: 算分位数时就地排序了输入切片",
+		file: "internal/eval/run.go",
+		old:  `s := append([]float64(nil), ms...)`,
+		new:  `s := ms`,
+	},
+	{
+		// 同上，在评测这一层：`-overlap 0` 被静默换成 60，
+		// 参数扫描里 Overlap=0 那一整列都是假的。
+		name: "eval: 候选重叠 0 被当成未传",
+		file: "internal/eval/run.go",
+		old:  `if o.Overlap < 0 {`,
+		new:  `if o.Overlap <= 0 {`,
+	},
+	{
+		// 候选倍数写成 1：基线跑在了一个不存在的配置上，
+		// 「融合比单路好多少」测的其实是「候选不够时融合好不好」。
+		// 写成 -2 而不是直接写 1：直接写 1 会让 retrieve 包失去引用，
+		// 编译不过（变异会被判 BROKEN 而不是 CAUGHT），
+		// 那样这条变异就失去意义了——我们要的是「能编译但行为错」。
+		name: "eval: 候选倍数默认写成 1 而非生产值",
+		file: "internal/eval/run.go",
+		old:  `o.Mult = retrieve.DefaultCandidateMultiplier`,
+		new:  `o.Mult = retrieve.DefaultCandidateMultiplier - 2`,
+	},
+	{
+		// 键里不带模型名：换模型后会静默读到旧模型的向量，
+		// 维度一样、跑得通，只是语义空间完全不同。
+		name: "embed: 缓存键里不带模型名",
+		file: "internal/embed/cache.go",
+		old:  `h.Write([]byte(c.model))`,
+		new:  `_ = c.model`,
+	},
+	{
+		// 缓存不生效：命中率永远 0，参数扫描从几分钟变几小时。
+		name: "embed: 缓存从不命中",
+		file: "internal/embed/cache.go",
+		old:  `if v, ok := c.load(t); ok {`,
+		new:  `if v, ok := c.load(t); false && ok {`,
 	},
 }
 

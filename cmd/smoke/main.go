@@ -432,6 +432,25 @@ func run() error {
 	check(docID > 0, "导入返回了文档 ID")
 	check(chunkCount > 0, "切分出了片段")
 
+	// 同一份内容再导一次：库里应当**还是只有这一份**（#55）。
+	//
+	// 这条断言必须在**同一个进程、同一个库**上连着做两次导入才测得出来，
+	// 所以它只能放在端到端这一层——单元测试用的是各自干净的内存库。
+	//
+	// 说它是真问题的依据：修之前跑两次冒烟测试，库里就会出现两份
+	// 内容完全相同的「冒烟测试文档」，检索结果里两条一模一样。
+	again, err := srv.callTool("import_document", map[string]any{
+		"title":   "冒烟测试文档",
+		"source":  "smoke-test",
+		"content": smokeDocContent,
+	})
+	if err != nil {
+		return err
+	}
+	againID := int(asFloat(again["document_id"]))
+	check(againID != docID,
+		fmt.Sprintf("重复导入应当替换而不是复用同一条记录（%d → %d）", docID, againID))
+
 	fmt.Println("\n=== 4. 检索 ===")
 	found, err := srv.callTool("search_knowledge_base", map[string]any{
 		"query": "pgvector 版本要求",
@@ -502,6 +521,22 @@ func run() error {
 	}
 	check(hasSmokeSource, fmt.Sprintf("本次导入的结果带上了 source（实际 %q）", sources))
 
+	// 上下文扩展（#49）：命中片段应当带出相邻片段的摘要。
+	//
+	// 这条断言的价值在于它走的是**完整的序列化链路**——从 service 取邻居、
+	// 塞进 DTO、过一遍 JSON、再读回来。`source` 当年就栽在这个接缝上：
+	// 字段声明了、jsonschema 里也有描述，但构造它的函数从不赋值，
+	// 而单元测试一次都没提到过那个字段。**声明 ≠ 赋值。**
+	var withContext int
+	for _, item := range results {
+		m := asMap(item)
+		if asString(m["context_before"]) != "" || asString(m["context_after"]) != "" {
+			withContext++
+		}
+	}
+	check(withContext > 0,
+		fmt.Sprintf("命中的片段带出了相邻片段摘要（%d/%d 条有）", withContext, len(results)))
+
 	// 输出里绝不能有向量。
 	//
 	// ⚠️ 必须**按键名**判断，不能用子串——`matched_by` 的合法取值里
@@ -509,6 +544,15 @@ func run() error {
 	keys := map[string]bool{}
 	collectKeys(found, keys)
 	check(!keys["embedding"] && !keys["Embedding"], "输出里不含向量字段")
+	// 原始分必须暴露出来（#53）。
+	//
+	// 工具不做相关性过滤，判断责任交给 Agent——而那要求它**拿得到原始分**。
+	// 只给 RRF 分的话，Agent 手上是一个完全无法判断相关性的数字
+	// （实测：库里没有答案时的最高 RRF 分与真正命中时完全相同）。
+	keys = map[string]bool{}
+	collectKeys(found, keys)
+	check(keys["lexical_score"] && keys["vector_score"],
+		"结果里暴露了原始分（lexical_score / vector_score）")
 
 	fmt.Println("\n=== 5. stderr 日志 ===")
 	for _, line := range srv.stderrTail(6) {
@@ -547,3 +591,18 @@ func sorted(in []string) []string {
 	}
 	return out
 }
+
+// smokeDocContent 是冒烟测试导入的文档正文。
+//
+// 提成常量是必须的：去重（#55）按**内容指纹**判断"是不是同一份"，
+// 两次导入只要差一个字符就会被当成两份文档，而那正是这条断言要测的东西。
+// 就地写两遍字符串迟早会漂移。
+const smokeDocContent = "# 安装指南\n" +
+	"\n" +
+	"ContextDock 需要 Go 1.25 以上版本。\n" +
+	"\n" +
+	"## 数据库\n" +
+	"\n" +
+	"PostgreSQL 需要安装 pgvector 扩展，且版本不低于 0.8.6。\n" +
+	"HNSW 索引对 vector 类型的上限是 2000 维。\n" +
+	""

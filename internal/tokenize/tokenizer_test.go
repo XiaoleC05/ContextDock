@@ -265,3 +265,83 @@ func BenchmarkTokenizeEnglish(b *testing.B) {
 		_ = tk.Tokenize(s)
 	}
 }
+
+// TestSchemeProducesExpectedCJKTokens 固定三种方案在中文上的切法。
+//
+// 之所以要钉死：切换方案是 #45 的对比实验，而「两种方案其实产出了同一批 token」
+// 这种失效不报错——只是两组数据看起来一模一样，然后被当成"方案没影响"。
+func TestSchemeProducesExpectedCJKTokens(t *testing.T) {
+	tests := []struct {
+		scheme Scheme
+		in     string
+		want   []string
+	}{
+		{SchemeBigram, "检索系统", []string{"检索", "索系", "系统"}},
+		{SchemeUnigram, "检索系统", []string{"检", "索", "系", "统"}},
+		{SchemeBoth, "检索系统", []string{"检", "索", "系", "统", "检索", "索系", "系统"}},
+		// 单字段落三种方案都只出一个字——否则单字查询永远召回不到。
+		{SchemeBigram, "库", []string{"库"}},
+		{SchemeUnigram, "库", []string{"库"}},
+		{SchemeBoth, "库", []string{"库"}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.scheme)+"/"+tt.in, func(t *testing.T) {
+			got := NewWith(tt.scheme).Tokenize(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("token 数 = %d（%v），期望 %d（%v）",
+					len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("第 %d 个 token = %q，期望 %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestSchemeDoesNotAffectLatin 拉丁词在任何方案下都按词切。
+// 那些语言有空格，没有选择的余地——方案只该影响 CJK 部分。
+func TestSchemeDoesNotAffectLatin(t *testing.T) {
+	want := []string{"pgvector", "search"}
+	for _, s := range AllSchemes {
+		got := NewWith(s).Tokenize("pgvector Search")
+		if len(got) != len(want) {
+			t.Fatalf("%s: %v，期望 %v", s, got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("%s: 第 %d 个 = %q，期望 %q", s, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestNewWithFallsBackToBigram(t *testing.T) {
+	// 方案不合法时回落成 bigram，而不是报错或返回空。
+	// 返回空更糟：它不报错，只是什么都搜不到。
+	for _, bad := range []Scheme{"", "不存在的方案"} {
+		got := NewWith(bad).Tokenize("检索系统")
+		if len(got) != 3 || got[0] != "检索" {
+			t.Errorf("非法方案 %q 应回落成 bigram，实际 %v", bad, got)
+		}
+	}
+}
+
+func TestSchemeRoundTrip(t *testing.T) {
+	if New().Scheme() != SchemeBigram {
+		t.Error("New() 应当是 bigram")
+	}
+	for _, s := range AllSchemes {
+		if NewWith(s).Scheme() != s {
+			t.Errorf("NewWith(%s).Scheme() 应为 %s", s, s)
+		}
+	}
+	// 零值 Tokenizer 也要能用（别让 New 成为必需的前置条件）。
+	if (*Tokenizer)(nil) == nil {
+		var zero Tokenizer
+		if zero.Scheme() != SchemeBigram {
+			t.Error("零值 Tokenizer 的方案应当是 bigram")
+		}
+	}
+}

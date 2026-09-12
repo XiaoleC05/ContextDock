@@ -51,6 +51,18 @@ func NewBM25() *BM25 {
 	}
 }
 
+// WithTokenizer 换一个分词器，用于做分词方案对比实验（#45）。
+//
+// ⚠️ 索引端和查询端必须用**同一个**分词器实例。换分词器意味着
+// 已有的索引全部作废——倒排表是按旧方案的 token 建的，用新方案去查
+// 只会查不到东西，而且不报错。所以这个方法应该在 Index 之前调用。
+func (m *BM25) WithTokenizer(tk *tokenize.Tokenizer) *BM25 {
+	if tk != nil {
+		m.tk = tk
+	}
+	return m
+}
+
 // WithParams 覆盖 k1 和 b，用于做参数对比实验。
 //
 // k1 控制词频饱和：越大，词频高的文档越占优，趋近线性。

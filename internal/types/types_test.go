@@ -522,3 +522,48 @@ func TestTruncateRunesHandlesMultiByte(t *testing.T) {
 		}
 	}
 }
+
+// ---- 去重键（#55）----
+//
+// ⚠️ 这几条测试必须留在 **types 包**里，不能只写在 ingest 包。
+// 变异测试是**按包**跑的（`go test ./<被变异的文件所在包>/...`），
+// 变异改的是 types/document.go，只在 ingest 里测的话根本不会被执行——
+// 实测过：那样写的话这两条变异会报 MISSED，看起来像"测试是假的"。
+func TestDedupKeyUsesSourceWhenReal(t *testing.T) {
+	// 有真实来源时用来源：这样"文件改了再导入"是**替换**而不是新增，
+	// 否则旧版本会一直留在库里，而用户明明是在更新它。
+	if got := DedupKey("docs/deploy.md", "hash1"); got != "src:docs/deploy.md" {
+		t.Errorf("有来源时应当用来源作键，实际 %q", got)
+	}
+	// 内容变了，键不变 —— 这正是"更新"能被识别为更新的原因。
+	if DedupKey("docs/deploy.md", "hash1") != DedupKey("docs/deploy.md", "hash2") {
+		t.Error("同一个来源、内容变了，去重键应当保持不变（那是同一次更新）")
+	}
+}
+
+func TestDedupKeyFallsBackToHashForInline(t *testing.T) {
+	// 没有真实来源时退到内容指纹。
+	//
+	// 直接传文本时 source 都是 "inline"，把它当身份的话
+	// 两份完全不同的笔记会互相顶掉，只剩最后一份。
+	if got := DedupKey(InlineSource, "hash1"); got != "sha:hash1" {
+		t.Errorf("inline 应当退到内容指纹，实际 %q", got)
+	}
+	if got := DedupKey("", "hash1"); got != "sha:hash1" {
+		t.Errorf("空来源应当退到内容指纹，实际 %q", got)
+	}
+	if DedupKey(InlineSource, "hash1") == DedupKey(InlineSource, "hash2") {
+		t.Error("两份不同的 inline 内容不该撞键")
+	}
+}
+
+func TestDedupKeyPrefixesCannotCollide(t *testing.T) {
+	// 前缀是必须的：`sha:` 与 `src:` 两种键永远不能相等。
+	// 否则一份 source 恰好叫 "sha:abc" 的文档，会和另一份内容指纹为
+	// "abc" 的文档撞上——两份毫不相干的东西被当成同一份。
+	a := DedupKey("sha:abc", "whatever")
+	b := DedupKey(InlineSource, "abc")
+	if a == b {
+		t.Errorf("来源与内容指纹的键不该撞上：%q vs %q", a, b)
+	}
+}

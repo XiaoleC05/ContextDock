@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 
 	"github.com/XiaoleC05/ContextDock/internal/chunk"
@@ -22,6 +23,7 @@ import (
 	"github.com/XiaoleC05/ContextDock/internal/ingest"
 	"github.com/XiaoleC05/ContextDock/internal/retrieve"
 	"github.com/XiaoleC05/ContextDock/internal/store"
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
@@ -41,9 +43,51 @@ type Service struct {
 	bm25   *retrieve.BM25
 	vecIdx *retrieve.VectorIndex
 
+	// byDoc 按 DocumentID 分组的片段，组内按 Ordinal 升序。
+	//
+	// 上下文扩展（#49）要用它取相邻片段。放在内存索引里而不是每次查库：
+	// 那是 O(1) 查找，而每次检索都打一次库会把延迟从亚毫秒推到毫秒级——
+	// 而检索结果已经在内存里了，再查一次库是纯粹的浪费。
+	byDoc map[int64][]types.Chunk
+
 	// 检索到的统计信息，用于日志和诊断。
 	indexedChunks int
 	embeddedCount int
+	textBytes     int64
+}
+
+// IndexStats 是内存索引的规模。
+//
+// 单独开一个方法而不是往 Stats() 上加返回值：Stats() 的二元组
+// 已经在别处被用着，改签名要动所有调用点，而那些调用点并不关心体积。
+type IndexStats struct {
+	// Chunks 是索引里的片段总数。
+	Chunks int
+
+	// Embedded 是其中带向量的片段数。
+	Embedded int
+
+	// TextBytes 是片段正文的字节总量（不含向量）。
+	TextBytes int64
+
+	// VectorBytes 是向量占用的字节数，按 float32 × 维度估算。
+	//
+	// ⚠️ 这是**进程内**的内存占用，不是数据库里的存储占用。
+	// 两者在 pgvector 那边不完全相等（有行开销和索引），
+	// 但对「切得越碎、索引涨多快」这个量级判断已经够用。
+	VectorBytes int64
+}
+
+// IndexStats 返回当前内存索引的规模。
+func (s *Service) IndexStats() IndexStats {
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	return IndexStats{
+		Chunks:      s.indexedChunks,
+		Embedded:    s.embeddedCount,
+		TextBytes:   s.textBytes,
+		VectorBytes: int64(s.embeddedCount) * types.EmbeddingDim * 4,
+	}
 }
 
 // New 组装一个 Service。
@@ -61,8 +105,10 @@ func New(cfg *config.Config, emb embed.Embedder, st store.Store) (*Service, erro
 		embedder: emb,
 		store:    st,
 		ingester: ingest.New(chunker, emb, st),
-		bm25:     retrieve.NewBM25(),
-		vecIdx:   retrieve.NewVectorIndex(),
+		// 分词方案来自配置，索引端与查询端共用这一个实例——
+		// 两边用不同的分词器会让召回静默对不上（见 tokenize 包的说明）。
+		bm25:   retrieve.NewBM25().WithTokenizer(tokenize.NewWith(cfg.TokenizeScheme)),
+		vecIdx: retrieve.NewVectorIndex(),
 	}, nil
 }
 
@@ -96,6 +142,27 @@ func (s *Service) Rebuild(ctx context.Context) error {
 
 	s.indexedChunks = len(chunks)
 	s.embeddedCount = len(withVec)
+
+	// 正文体积在重建时顺手算掉：评测要用它判断「切得越碎、索引涨多快」，
+	// 而为此再遍历一遍全部片段不值得。
+	var textBytes int64
+	for _, c := range chunks {
+		textBytes += int64(len(c.Content))
+	}
+	s.textBytes = textBytes
+
+	// 顺手按文档分组，供上下文扩展取相邻片段。
+	// 组内顺序由 AllChunks 保证（它按 (document_id, ordinal) 读出），
+	// 但这里仍然不假设，下面用 Ordinal 排序兜底。
+	byDoc := make(map[int64][]types.Chunk, 16)
+	for _, c := range chunks {
+		byDoc[c.DocumentID] = append(byDoc[c.DocumentID], c)
+	}
+	for id := range byDoc {
+		doc := byDoc[id]
+		sort.Slice(doc, func(i, j int) bool { return doc[i].Ordinal < doc[j].Ordinal })
+	}
+	s.byDoc = byDoc
 
 	if len(chunks) > 0 && len(withVec) < len(chunks) {
 		// 这条日志很重要：说明有一批片段没有向量，

@@ -201,7 +201,13 @@ func TestSearchAfterImport(t *testing.T) {
 	if out.Results[0].Content == "" {
 		t.Error("结果里应当有正文")
 	}
-	if out.Hint != "" {
+	// ⚠️ 这条断言**改过**。原来它断言「有结果时 hint 必须为空」，
+	// 而 #54 之后有结果时也会带一条说明——但**内容完全不同**：
+	// 空结果说「去导入文档」，有结果说「分数判断不了相关性，请读内容」。
+	//
+	// 所以要断的是**语义**（不该出现"没找到"那套），而不是"字段为空"——
+	// 后者会把一条正确的说明误判成回归。
+	if strings.Contains(out.Hint, "没有匹配的内容") {
 		t.Errorf("有结果时不该给出「没找到」的提示: %q", out.Hint)
 	}
 }
@@ -278,23 +284,60 @@ func TestSearchEmptyQuery(t *testing.T) {
 	}
 }
 
-// TestSearchGivesHintWhenEmpty 验证空结果时给出可操作建议。
+// TestSearchGivesHintWhenEmpty 验证**索引为空**时给出可操作建议。
 //
 // 只回一个空数组的话，Agent 通常只会说"没找到"，
 // 用户不知道下一步该干什么。
+//
+// ⚠️ 这条测试**改过**。原来它先导入一份无关文档、再搜一个无关问题，
+// 期望"检索器召回不到"——于是它永远 SKIP：库里非空时检索**总会返回 top-K 条**
+// （见 README「没有相关性阈值」）。一条长期 SKIP 的测试等于没有测试。
+//
+// 现在直接测"索引为空"这个能确定构造出来的前提。
 func TestSearchGivesHintWhenEmpty(t *testing.T) {
-	svc := newTestService(t)
-	callImport(t, svc, ImportInput{Title: "无关文档", Content: "今天天气不错，适合出门散步。"})
+	svc := newTestService(t) // 不导入任何东西 → 索引为空
 
-	out := callSearch(t, svc, SearchInput{Query: "量子纠缠的数学基础"})
+	out := callSearch(t, svc, SearchInput{Query: "随便问点什么"})
 	if out.Count != 0 {
-		t.Skip("检索器召回了不相关的内容，本用例的前提不成立")
+		t.Fatalf("索引为空时不该有结果，实际 %d 条", out.Count)
 	}
 	if out.Hint == "" {
-		t.Error("空结果时应当给出下一步建议")
+		t.Fatal("空结果时应当给出下一步建议")
 	}
 	if !strings.Contains(out.Hint, "import_document") {
 		t.Errorf("建议里应当提到导入工具: %q", out.Hint)
+	}
+}
+
+// TestSearchExplainsScoreLimitation 验证**有结果**时说明分数判断不了相关性。
+//
+// 这是 #54 的交付。原问题：库非空但问题完全不相关时，检索照样返回 top-K 条，
+// 而且不带任何信号。补"不相关提示"被实测否掉了——四类候选信号
+// （最高余弦 / 顶部陡峭度 / 两路一致条数 / 融合分差）**全部与真正命中的重叠**，
+// 没有任何阈值能不误判。
+//
+// 所以交付的不是相关性判断，而是**把"工具判断不了"明说**：
+// Agent 能看到 content，工具只有分数——它缺的正是这条信息。
+func TestSearchExplainsScoreLimitation(t *testing.T) {
+	svc := newTestService(t)
+	callImport(t, svc, ImportInput{
+		Title:   "无关文档",
+		Content: "今天天气不错，适合出门散步。公园里的花开得正好。",
+	})
+
+	// 一个库里根本没有答案的问题——检索照样会返回 top-K 条。
+	out := callSearch(t, svc, SearchInput{Query: "量子纠缠的数学基础"})
+	if out.Count == 0 {
+		t.Fatal("库非空时检索总会返回结果，本用例的前提是「有结果但可能不相关」")
+	}
+	if out.Hint == "" {
+		t.Fatal("有结果时也应当说明分数的局限——否则 Agent 没有任何信号")
+	}
+	if !strings.Contains(out.Hint, "score") {
+		t.Errorf("说明里应当点出 score 这个字段名，实际: %q", out.Hint)
+	}
+	if !strings.Contains(out.Hint, "content") {
+		t.Errorf("说明里应当告诉 Agent 去看 content，实际: %q", out.Hint)
 	}
 }
 
@@ -379,7 +422,14 @@ func TestResultItemHasNoEmbeddingField(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"content": true, "score": true, "ordinal": true}
+	// 白名单只收**标量**。往这里加字段时问一句「它会不会是 1024 个浮点数」——
+	// 那正是这个测试要挡的东西。
+	want := map[string]bool{
+		"content": true, "score": true, "ordinal": true,
+		// 原始分（#53）：两个标量，用来让 Agent 自己判断相关性。
+		// RRF 分完全不可分，原始分部分可分——但都不该由工具替 Agent 过滤。
+		"lexical_score": true, "vector_score": true,
+	}
 	for k := range m {
 		if !want[k] {
 			t.Errorf("ResultItem 出现了未预期的字段 %q —— "+
