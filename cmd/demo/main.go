@@ -2,8 +2,11 @@
 //
 // 它跑两条真实路径，把输出渲染成一张终端样式的 SVG：
 //
-//  1. go run ./cmd/eval   —— 检索质量评测（假嵌入，确定、不花钱）
-//  2. 一次 MCP 检索       —— 真实嵌入，走完整的 initialize → 导入 → 检索
+//  1. go run ./cmd/eval   —— 检索质量评测
+//  2. 一次 MCP 检索       —— 走完整的 initialize → 导入 → 检索
+//
+// 两步**默认都用真实嵌入**（bge-m3），因为图要展示的是真实检索质量；
+// 用 -eval-fake-embed 可以让第一步不联网。
 //
 // ⚠️ 这张图里的**每一行都是真实命令的输出**，渲染器只加了一个终端外框，
 // 不做换行、不做截断、不重排、不"美化"数字。素材要能被当作证据，
@@ -14,6 +17,7 @@
 //	go run ./cmd/demo                     # 生成 docs/demo.svg 并打印到终端
 //	go run ./cmd/demo -query "你的问题"    # 换一条查询
 //	go run ./cmd/demo -no-search          # 跳过真实检索（没有 API Key 时）
+//	go run ./cmd/demo -check              # 只检查已提交的素材是否过期（不写文件）
 //
 // 真实检索需要 .env 里有可用的 SILICONFLOW_API_KEY，且**会真的调用 API**
 // （一次导入 + 一次查询，成本不到一分钱）。日志里 Key 是打码的，
@@ -27,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -54,17 +59,36 @@ func main() {
 		noSearch = flag.Bool("no-search", false, "跳过真实检索（没有 API Key 时）")
 		evalFake = flag.Bool("eval-fake-embed", false,
 			"评测表用假嵌入跑（不联网、完全确定，但数字不代表真实质量）")
+		check = flag.Bool("check", false,
+			"只检查已提交的素材是否还和当前代码/参数一致，不一致就非 0 退出；不写文件")
 		root = flag.String("root", ".", "仓库根目录")
 	)
 	flag.Parse()
 
-	if err := run(*root, *out, *bin, *doc, *query, *topK, *noSearch, *evalFake); err != nil {
+	if err := run(*root, *out, *bin, *doc, *query, *topK, *noSearch, *evalFake, *check); err != nil {
+		if *check {
+			// -check 的失败是**预期**的一种结果（素材确实过期了），
+			// 所以不打"生成失败"这个前缀，免得看起来像工具坏了。
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "生成演示素材失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(root, out, binPath, doc, query string, topK int, noSearch, evalFake bool) error {
+// dateInFooter 匹配页脚里的生成日期。
+//
+// 比对时要把两边都抹掉：素材是**当天**生成的，隔天再跑必然不同，
+// 而那不代表它过期了。真正要比的是数字和排版。
+var dateInFooter = regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
+
+// stripDates 把日期换成占位符，供 -check 比对。
+func stripDates(s string) string {
+	return dateInFooter.ReplaceAllString(s, "DATE")
+}
+
+func run(root, out, binPath, doc, query string, topK int, noSearch, evalFake, check bool) error {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return err
@@ -117,6 +141,28 @@ func run(root, out, binPath, doc, query string, topK int, noSearch, evalFake boo
 		time.Now().Format("2006-01-02"))
 
 	svg := RenderSVG("contextdock — 检索质量与一次真实检索", lines, footer)
+
+	// ---- -check：只比对，不写文件 ----
+	//
+	// 加上它的原因：这张图是 README 里**第一眼看到的东西**，
+	// 而没有任何机制会让它保持最新——改了检索或评测参数之后，
+	// 图还是那张图，数字悄悄变成错的。本项目已经吃过一次同类的亏
+	// （README 里「92 个变异」那个数字过期了没人知道）。
+	//
+	// ⚠️ CI 跑不了它：图里的评测表用的是**真实嵌入**，而 CI 没有 API Key。
+	// 所以这是**发版前**的一条本地检查，不是 CI 门禁。
+	if check {
+		existing, err := os.ReadFile(out)
+		if err != nil {
+			return fmt.Errorf("读不到已提交的 %s，没法比对：%w", out, err)
+		}
+		if stripDates(string(existing)) != stripDates(svg) {
+			return fmt.Errorf("⚠️ %s 已过期——按当前代码与参数重新生成的内容和它对不上。\n"+
+				"重跑 `go run ./cmd/demo` 更新它（改了检索、切分或评测参数之后都要重跑）。", out)
+		}
+		fmt.Printf("✅ %s 与当前代码/参数一致\n", out)
+		return nil
+	}
 
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return fmt.Errorf("创建输出目录失败: %w", err)
