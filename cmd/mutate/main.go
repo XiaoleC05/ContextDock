@@ -529,6 +529,15 @@ var mutations = []mutation{
 		new:  `		text, ok := "", false`,
 	},
 
+	{
+		// 不记评测集指纹：报告里只有语料指纹，而"这次跑的是哪份评测集"
+		// 同样决定了数字可不可比——评测集改起来比语料容易得多。
+		name: "eval: 不记评测集指纹",
+		file: "internal/eval/load.go",
+		old:  `		set.SHA256 = Fingerprint(string(raw))`,
+		new:  `		set.SHA256 = ""`,
+	},
+
 	// ---- 质量门禁（#57）----
 	{
 		// 门禁永不报警：指标掉多少都放过去，等于没有门禁。

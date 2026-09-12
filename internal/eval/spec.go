@@ -226,4 +226,10 @@ type QuerySet struct {
 
 	// Queries 是子集内的全部查询。
 	Queries []Query `json:"queries"`
+
+	// SHA256 是**文件内容**的指纹，由加载器填充，用于可复现性（#58）。
+	//
+	// 记它而不只记查询条数：条数相同、内容不同的两份评测集，
+	// 跑出来的数字差别可能很大——而报告上只写着"51 条"，看不出区别。
+	SHA256 string `json:"sha256,omitempty"`
 }

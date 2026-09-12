@@ -38,6 +38,14 @@ func WriteTable(w io.Writer, rep *Report) error {
 		humanBytes(rep.TextBytes), humanBytes(rep.VectorBytes),
 		humanBytes(rep.TextBytes+rep.VectorBytes), rep.ImportMs)
 
+	// ---- 输入指纹 ----
+	//
+	// 放在最前面：可复现性的第一步是"确认读的是同一份输入"。
+	// 数字不同时，先看指纹——语料或评测集变了的话，
+	// 后面所有比较都不成立，不必再往下看。
+	fmt.Fprintf(w, "输入指纹：语料 %s；评测集 %s\n\n",
+		fingerprintSummary(corpusFingerprints(rep)), fingerprintSummary(querySetFingerprints(rep)))
+
 	// ---- 按子集 ----
 	fmt.Fprintln(w, "按子集分通道成绩：")
 	writeGroupTable(w, rep)
@@ -327,4 +335,41 @@ func WriteCorpusState(w io.Writer, st *CorpusState, asJSON bool) error {
 	fmt.Fprintln(w, "\n说明：只切分不嵌入，所以不花 API 调用。向量数等于片段数（每个片段一个向量）。")
 	fmt.Fprintln(w, "      要确认向量数请跑一次完整评测——报告里有 total_chunks 与实际嵌入数。")
 	return nil
+}
+
+// fingerprintSummary 把若干 (名字 → 指纹) 压成一行短摘要。
+//
+// 只列前 8 位：完整指纹在 -json 里有，而人读的表格里列全了反而看不清。
+// 前缀相同就够判断"两次跑的是不是同一份"了。
+func fingerprintSummary(items []string) string {
+	if len(items) == 0 {
+		return "（无）"
+	}
+	if len(items) > 3 {
+		return fmt.Sprintf("%d 份（%s…）", len(items), strings.Join(items[:3], " "))
+	}
+	return strings.Join(items, " ")
+}
+
+func corpusFingerprints(rep *Report) []string {
+	out := make([]string, 0, len(rep.Origins))
+	for _, f := range rep.Origins {
+		out = append(out, shortHash(f.Source, f.SHA256))
+	}
+	return out
+}
+
+func querySetFingerprints(rep *Report) []string {
+	out := make([]string, 0, len(rep.QuerySets))
+	for _, q := range rep.QuerySets {
+		out = append(out, shortHash(string(q.Group), q.SHA256))
+	}
+	return out
+}
+
+func shortHash(name, sum string) string {
+	if len(sum) > 8 {
+		sum = sum[:8]
+	}
+	return name + ":" + sum
 }

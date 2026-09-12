@@ -513,3 +513,33 @@ func TestOtherGroupsRejectEmptyExpect(t *testing.T) {
 		t.Errorf("错误信息应说明原因，实际:\n%v", err)
 	}
 }
+
+func TestLoadRecordsQuerySetFingerprint(t *testing.T) {
+	// 可复现性（#58）要求报告里带上"这次跑的到底是哪份输入"。
+	// 只有语料指纹是不够的——评测集改了同样让数字不可比，
+	// 而它改起来比语料容易得多（加一条查询、改一个引文）。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+
+	suite, err := Load(root)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	set := suite.Sets[0]
+	if len(set.SHA256) != 64 {
+		t.Errorf("评测集指纹应当是 64 位十六进制，实际 %q", set.SHA256)
+	}
+
+	// 改一个字，指纹必须变——否则它记的不是内容。
+	root2 := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q2","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+	suite2, err := Load(root2)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if suite2.Sets[0].SHA256 == set.SHA256 {
+		t.Error("评测集内容变了，指纹应当跟着变")
+	}
+}

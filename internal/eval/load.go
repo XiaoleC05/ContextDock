@@ -221,6 +221,11 @@ func loadQuerySets(dir string, corpus *Corpus, contents map[string]string,
 			return nil, err
 		}
 
+		// 与语料指纹同一套口径（先归一化换行再算 sha256）。
+		// 两处口径不一致的话，同一份评测集在本机和 CI 上指纹不同，
+		// 而"可复现性"的第一步就是"确认读的是同一份输入"。
+		set.SHA256 = Fingerprint(string(raw))
+
 		where := e.Name()
 		if set.Version != FormatVersion {
 			problems.Addf("%s: version=%d，本程序只认 %d", where, set.Version, FormatVersion)

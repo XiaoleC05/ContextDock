@@ -236,6 +236,13 @@ type Report struct {
 	// Origins 是语料清单，记进报告以满足可复现性要求（#58）。
 	Origins []CorpusFile `json:"origins"`
 
+	// QuerySets 是评测集文件的指纹。
+	//
+	// 与 Origins 一起构成"这次评测到底跑的是哪份输入"的完整凭据。
+	// 只有语料指纹是不够的——评测集改了同样会让数字不可比，
+	// 而它改起来比语料容易得多（加一条查询、改一个引文）。
+	QuerySets []QuerySetInfo `json:"query_sets"`
+
 	// Embedder 是嵌入缓存/上游的命中统计，零值表示没启用缓存。
 	Embed embed.Stats `json:"embed_cache"`
 
@@ -367,6 +374,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		Options:     opt,
 		Corpus:      stats,
 		Origins:     suite.Corpus.Files,
+		QuerySets:   querySetInfos(suite),
 		TotalChunks: idx.Chunks,
 		TextBytes:   idx.TextBytes,
 		VectorBytes: idx.VectorBytes,
@@ -642,4 +650,22 @@ func collectScores(samples map[string][]float64, group Group, expects []Expect, 
 			samples[distCosIrr] = append(samples[distCosIrr], r.VectorScore)
 		}
 	}
+}
+
+// QuerySetInfo 是一个评测集文件的指纹。
+type QuerySetInfo struct {
+	Group   Group  `json:"group"`
+	SHA256  string `json:"sha256"`
+	Queries int    `json:"queries"`
+}
+
+// querySetInfos 收集全部评测集的指纹，顺序与 AllGroups 一致。
+func querySetInfos(suite *Suite) []QuerySetInfo {
+	out := make([]QuerySetInfo, 0, len(suite.Sets))
+	for _, s := range suite.Sets {
+		out = append(out, QuerySetInfo{
+			Group: s.Group, SHA256: s.SHA256, Queries: len(s.Queries),
+		})
+	}
+	return out
 }
