@@ -2,14 +2,21 @@
 
 // 集成测试：需要一个真实的 PostgreSQL + pgvector 实例。
 //
-// 默认连本机 docker compose 起的那个：
+// ⚠️ **必须显式指定 CONTEXTDOCK_TEST_DSN，否则整个包的测试会被跳过。**
+//
+// 这里刻意**没有默认值**：每个测试都会 `TRUNCATE document CASCADE`，
+// 而回落到开发库（deploy/docker-compose.yml 起的那个）意味着
+// 「照着文档跑一次测试就把开发库清空了」，跑的人还不会意识到。
+//
+// 用一个**专用库**：
 //
 //	docker compose -f deploy/docker-compose.yml up -d
-//	go test -v -tags=integration ./internal/store/
-//
-// 换地址用环境变量：
-//
-//	CONTEXTDOCK_TEST_DSN="postgres://..." go test -tags=integration ./internal/store/
+//	docker exec contextdock-pg psql -U postgres -c "CREATE DATABASE contextdock_test"
+//	for f in migrations/*.sql; do
+//	    docker exec -i contextdock-pg psql -v ON_ERROR_STOP=1 -U postgres -d contextdock_test < "$f"
+//	done
+//	CONTEXTDOCK_TEST_DSN="postgres://postgres:postgres@localhost:5432/contextdock_test?sslmode=disable" \
+//	    go test -v -tags=integration ./internal/store/
 package store
 
 import (
@@ -27,13 +34,27 @@ import (
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
-const defaultTestDSN = "postgres://postgres:postgres@localhost:5432/contextdock?sslmode=disable"
-
-func testDSN() string {
-	if v := os.Getenv("CONTEXTDOCK_TEST_DSN"); v != "" {
-		return v
+// testDSN 返回集成测试要连的库。**刻意没有默认值**。
+//
+// ⚠️ 这里曾经回落到 `postgres://…/contextdock`——也就是
+// deploy/docker-compose.yml 起的那个库、.env 里配的那个库。
+// 而每个集成测试都会 `TRUNCATE document CASCADE`：
+// **照着 README 跑一次测试就把开发库清空了**，而跑的人不会意识到。
+//
+// 清库本身没错（集成测试必须从干净状态开始），错的是"默认清哪个库"。
+// 所以现在缺 DSN 时直接**跳过**，把"要跑集成测试"变成一个显式动作。
+// CI 里本来就设了 CONTEXTDOCK_TEST_DSN，不受影响。
+func testDSN(t *testing.T) string {
+	t.Helper()
+	v := os.Getenv("CONTEXTDOCK_TEST_DSN")
+	if v == "" {
+		t.Skip("未设置 CONTEXTDOCK_TEST_DSN，跳过集成测试。\n" +
+			"这里刻意不回落到开发库——集成测试会 TRUNCATE，而开发库里可能有真实数据。\n" +
+			"要跑就显式指定一个**专用库**，例如：\n" +
+			"  CONTEXTDOCK_TEST_DSN=\"postgres://postgres:postgres@localhost:5432/contextdock_test?sslmode=disable\" \\\n" +
+			"    go test -tags=integration ./internal/store/")
 	}
-	return defaultTestDSN
+	return v
 }
 
 // newTestStore 连上数据库并清空表，保证每个测试从干净状态开始。
@@ -45,7 +66,7 @@ func newTestStore(t *testing.T) *Postgres {
 	t.Helper()
 	ctx := context.Background()
 
-	p, err := NewPostgres(ctx, testDSN(), 4, 0)
+	p, err := NewPostgres(ctx, testDSN(t), 4, 0)
 	if err != nil {
 		t.Fatalf("连接数据库失败（容器起来了吗？）: %v", err)
 	}
@@ -293,7 +314,7 @@ func TestIntegrationRebuildIndexAfterRestart(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2, err := NewPostgres(ctx, testDSN(), 4, 0)
+	p2, err := NewPostgres(ctx, testDSN(t), 4, 0)
 	if err != nil {
 		t.Fatalf("重连失败: %v", err)
 	}
