@@ -406,6 +406,14 @@ var mutations = []mutation{
 		new:  `_ = dec`,
 	},
 	{
+		// 重打指纹时直接沿用旧值：改过语料也「看不出变化」，
+		// 于是漂移被永久掩盖，而重打命令还报告「已是最新」。
+		name: "eval: 重打指纹时沿用旧值（永不发现变化）",
+		file: "internal/eval/corpus.go",
+		old:  `got := Fingerprint(text)`,
+		new:  `got := f.SHA256`,
+	},
+	{
 		name: "eval: 省略的 grade 补成「部分相关」而非「完全回答」",
 		file: "internal/eval/load.go",
 		old:  `e.Grade = GradeFull`,

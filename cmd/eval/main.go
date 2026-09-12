@@ -30,8 +30,28 @@ func run() error {
 	var (
 		root     = flag.String("root", ".", "仓库根目录（eval/ 所在的目录）")
 		validate = flag.Bool("validate", false, "只校验评测集与语料指纹，不跑检索")
+		stamp    = flag.Bool("stamp", false, "重打语料指纹（**破坏性**，只在有意改过语料后用）")
 	)
 	flag.Parse()
+
+	// -stamp 必须排在加载之前：它的用途正是修复「指纹对不上」的语料清单，
+	// 走 Load 会被指纹校验拦死，根本走不到修复那一步。
+	if *stamp {
+		changes, err := eval.Stamp(*root)
+		if err != nil {
+			return err
+		}
+		if len(changes) == 0 {
+			fmt.Println("语料指纹已是最新，未做改动。")
+			return nil
+		}
+		fmt.Printf("语料清单已更新（%d 份）：\n", len(changes))
+		for _, c := range changes {
+			fmt.Printf("  %s\n", c.Info())
+		}
+		fmt.Println("\n⚠️ 历史评测数字与这批语料不再可比，需重跑基线。")
+		return nil
+	}
 
 	// 校验与跑分走同一条加载路径：**能跑起来的评测集一定是校验过的**。
 	// 如果给 -validate 单独写一条只检查格式的捷径，那条捷径迟早会与

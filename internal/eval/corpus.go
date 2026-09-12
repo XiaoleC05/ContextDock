@@ -3,11 +3,14 @@ package eval
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/XiaoleC05/ContextDock/internal/chunk"
 )
 
 var (
@@ -44,6 +47,17 @@ type CorpusFile struct {
 	// 这不是装饰。语料选取是评测设计的一部分，不写下来，
 	// 后人只会看到一堆随机文件名，既不敢改也不知道缺什么。
 	Why string `json:"why"`
+
+	// ChunksAtDefault 是这份文档在**切分器默认参数**（400 字 / 60 字重叠）下
+	// 切出的片段数。
+	//
+	// 为什么是「记录下来」而不是「每次现算」：它是语料规模的一个快照，
+	// 用来回答「这批语料大概多少个片段」这类问题，不必为此起一次完整检索。
+	//
+	// ⚠️ 它**跟着切分参数走**。所以此值只由 Stamp 写入，与指纹同批更新——
+	// 手改必然过期，而一个悄悄过期的数字比没有数字更糟。
+	// 评测运行时看到的片段数应以评测报告为准，不是这个值。
+	ChunksAtDefault int `json:"chunks_at_default"`
 }
 
 // Corpus 是语料清单。
@@ -151,6 +165,116 @@ func (c *Corpus) Contents(root string) (map[string]string, error) {
 func Fingerprint(text string) string {
 	sum := sha256.Sum256([]byte(normalizeNewlines(text)))
 	return hex.EncodeToString(sum[:])
+}
+
+// StampChange 记录一次重打指纹里单个文件的变化。
+type StampChange struct {
+	Path      string
+	OldHash   string
+	NewHash   string
+	OldChunks int
+	NewChunks int
+}
+
+// Info 返回一行人可读的变化摘要。
+func (c StampChange) Info() string {
+	hashChanged := !strings.EqualFold(c.OldHash, c.NewHash)
+	switch {
+	case hashChanged:
+		return fmt.Sprintf("%s\n    sha256 %s\n       →   %s\n    片段数 %d → %d",
+			c.Path, c.OldHash, c.NewHash, c.OldChunks, c.NewChunks)
+	case c.OldChunks == 0:
+		// 首次记录片段数：内容是没动的，别把它说成「内容变了」。
+		return fmt.Sprintf("%s\n    内容未变，补记片段数 %d", c.Path, c.NewChunks)
+	default:
+		// 内容没变而片段数变了，只可能是切分参数动过。
+		return fmt.Sprintf("%s\n    内容未变，但片段数 %d → %d（切分参数变了吗？）",
+			c.Path, c.OldChunks, c.NewChunks)
+	}
+}
+
+// chunkCount 用给定切分器数一遍片段数。
+//
+// 空文档返回 0 而不是错误：语料里出现一个空文件是配置问题，
+// 但那是校验该管的事，不该让重打指纹这个动作整个失败。
+func chunkCount(c *chunk.Chunker, text string) (int, error) {
+	chunks, err := c.Split(1, text)
+	if err != nil {
+		if errors.Is(err, chunk.ErrEmptyDocument) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return len(chunks), nil
+}
+
+// Stamp 重新计算语料清单里每个文件的 sha256 并写回清单，返回发生变化的文件。
+//
+// ⚠️ **这是破坏性操作，绝不能在校验路径上被自动调用。**
+//
+// 自动更新指纹等于把「语料漂移」这道防线整个取消掉：语料变了评测器默默认了，
+// 跑出来的数字与历史不可比，而没有任何人知道。要更新指纹的必须是人，
+// 且是一次显式动作——所以它只能由 -stamp 这个显式开关触发。
+//
+// 复用同一个 Fingerprint 而不是让调用方自己算，是为了保证
+// 「重打」和「校验」两端口径完全一致。两处各写一遍的后果是：
+// 重打完指纹，校验照样失败，而两边代码看起来都对。
+func Stamp(root string) ([]StampChange, error) {
+	manifestPath := filepath.Join(root, filepath.FromSlash(Dir), CorpusManifest)
+
+	corpus, err := LoadCorpus(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// 片段数也要一起重算：它和指纹一样是**内容的派生事实**，
+	// 分开维护就一定会有一边过期。
+	chunker, err := chunk.New(chunk.DefaultConfig())
+	if err != nil {
+		return nil, fmt.Errorf("eval: 创建切分器失败: %w", err)
+	}
+
+	var changes []StampChange
+	for i := range corpus.Files {
+		f := &corpus.Files[i]
+		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.Path)))
+		if err != nil {
+			return nil, fmt.Errorf("eval: 读取语料 %s 失败: %w", f.Path, err)
+		}
+		// 用归一化后的文本，与 Contents 读到的、以及引文偏移所依据的
+		// 是同一个字符串。
+		text := normalizeNewlines(string(raw))
+
+		chunks, err := chunkCount(chunker, text)
+		if err != nil {
+			return nil, fmt.Errorf("eval: 试切分 %s 失败: %w", f.Path, err)
+		}
+
+		got := Fingerprint(text)
+		if strings.EqualFold(got, f.SHA256) && chunks == f.ChunksAtDefault {
+			continue
+		}
+		changes = append(changes, StampChange{
+			Path: f.Path, OldHash: f.SHA256, NewHash: got,
+			OldChunks: f.ChunksAtDefault, NewChunks: chunks,
+		})
+		f.SHA256 = got
+		f.ChunksAtDefault = chunks
+	}
+
+	// 没有任何变化就不动文件：时间戳变化会让人以为改过什么。
+	if len(changes) == 0 {
+		return nil, nil
+	}
+
+	out, err := json.MarshalIndent(corpus, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("eval: 序列化语料清单失败: %w", err)
+	}
+	if err := os.WriteFile(manifestPath, append(out, '\n'), 0o644); err != nil {
+		return nil, fmt.Errorf("eval: 写入语料清单失败: %w", err)
+	}
+	return changes, nil
 }
 
 // normalizeNewlines 把 CRLF / CR 统一成 LF。
