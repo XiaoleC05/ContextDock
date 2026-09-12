@@ -190,3 +190,29 @@ func (a *Aggregate) Mean() Aggregate {
 		NDCG:    a.NDCG / n,
 	}
 }
+
+// ScoreBand 是一组分数的分布。
+//
+// 用分位数而不是均值：分数分布是长尾的，均值会被少数高分拉走，
+// 而判断「能不能做阈值」看的正是**尾巴挨不挨得上**。
+type ScoreBand struct {
+	N   int     `json:"n"`
+	Min float64 `json:"min"`
+	P50 float64 `json:"p50"`
+	P90 float64 `json:"p90"`
+	Max float64 `json:"max"`
+}
+
+// Quantiles 从一组分数算出分布。
+func Quantiles(vs []float64) ScoreBand {
+	if len(vs) == 0 {
+		return ScoreBand{}
+	}
+	s := append([]float64(nil), vs...)
+	sort.Float64s(s)
+	at := func(p float64) float64 {
+		i := int(math.Ceil(p/100*float64(len(s)))) - 1
+		return s[max(0, min(i, len(s)-1))]
+	}
+	return ScoreBand{N: len(s), Min: s[0], P50: at(50), P90: at(90), Max: s[len(s)-1]}
+}

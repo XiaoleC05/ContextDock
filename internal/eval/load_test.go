@@ -482,3 +482,34 @@ func TestFingerprintIgnoresNewlineStyle(t *testing.T) {
 		t.Error("LF 与 CR 的指纹应相同")
 	}
 }
+
+func TestNoRelGroupAllowsEmptyExpect(t *testing.T) {
+	// norel 组按定义就没有期望命中——它期望的是"没有结果"。
+	// 别的组为空则一定是漏标了，必须拦住。
+	root := setupTree(t, map[string]string{
+		"norel.json": `{
+			"version": 1, "group": "norel", "title": "无答案",
+			"queries": [{"id":"nr-001","query":"完全无关的问题","expect":[]}]
+		}`,
+	}, corpusDoc)
+
+	if _, err := Load(root); err != nil {
+		t.Fatalf("norel 组应当允许空的 expect，实际: %v", err)
+	}
+}
+
+func TestOtherGroupsRejectEmptyExpect(t *testing.T) {
+	// 反面：别的组为空会让那条查询在任何指标里恒为未召回，
+	// 悄悄拉低整体分数而没人知道。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"问题","expect":[]}`),
+	}, corpusDoc)
+
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("普通组不该允许空的 expect")
+	}
+	if !strings.Contains(err.Error(), "没有任何期望命中") {
+		t.Errorf("错误信息应说明原因，实际:\n%v", err)
+	}
+}

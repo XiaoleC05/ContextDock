@@ -212,3 +212,71 @@ func TestAggregateEmptyMeanIsZero(t *testing.T) {
 		t.Errorf("空汇总的均值应为零值，实际 %+v", m)
 	}
 }
+
+func TestQuantilesUsesNearestRank(t *testing.T) {
+	vs := make([]float64, 100)
+	for i := range vs {
+		vs[i] = float64(i + 1)
+	}
+	b := Quantiles(vs)
+	if b.N != 100 || b.Min != 1 || b.Max != 100 {
+		t.Fatalf("N/Min/Max 不对：%+v", b)
+	}
+	if b.P50 != 50 || b.P90 != 90 {
+		t.Errorf("P50 应为 50、P90 应为 90（最近秩），实际 %v / %v", b.P50, b.P90)
+	}
+}
+
+func TestQuantilesDoesNotMutateInput(t *testing.T) {
+	vs := []float64{3, 1, 2}
+	_ = Quantiles(vs)
+	if vs[0] != 3 || vs[1] != 1 || vs[2] != 2 {
+		t.Errorf("输入切片被就地排序了：%v", vs)
+	}
+}
+
+func TestQuantilesEmpty(t *testing.T) {
+	if b := Quantiles(nil); b.N != 0 {
+		t.Errorf("空输入应返回零值，实际 %+v", b)
+	}
+}
+
+func TestCollectScoresSeparatesNoRelFromIrrelevant(t *testing.T) {
+	// ⚠️ 这条守的是 #52 的关键区分。
+	//
+	// 「不相关」有两种来源，性质完全不同：
+	//   1. 库里有答案但这条没命中（irr）—— 分数高是正常的
+	//   2. 库里根本没有答案（norel）—— 它的一切都是噪声
+	//
+	// 阈值要挡的是第 2 种。混在一起会把"查得到但没排好"误当成"查不到"，
+	// 从而把阈值定得过高——而那正是会让 13/43 条有答案的查询被误杀的那件事。
+	mk := func(score, vec float64) types.SearchResult {
+		c := types.Chunk{StartOffset: 0, EndOffset: 5}
+		c.SetMetadata(types.MetadataKeySource, "doc.md")
+		return types.SearchResult{Chunk: c, Score: score, VectorScore: vec}
+	}
+
+	// norel 组：expect 为空，返回的一切都进 norel 桶
+	samples := map[string][]float64{}
+	collectScores(samples, GroupNoRel, nil, []types.SearchResult{mk(0.03, 0.55)})
+	if len(samples[distRRFNoRel]) != 1 || len(samples[distRRFRel]) != 0 {
+		t.Errorf("norel 组的结果应进 norel 桶，实际 %+v", samples)
+	}
+
+	// 普通组：命中的进 rel 桶，没命中的进 irr 桶
+	samples = map[string][]float64{}
+	expects := []Expect{{Source: "doc.md", Start: 0, End: 5, Grade: GradeFull}}
+	collectScores(samples, GroupZH, expects, []types.SearchResult{mk(0.03, 0.7)})
+	if len(samples[distRRFRel]) != 1 || len(samples[distRRFNoRel]) != 0 {
+		t.Errorf("命中的结果应进 rel 桶，实际 %+v", samples)
+	}
+
+	samples = map[string][]float64{}
+	// 同一条查询返回一条区间不重叠的结果 → 不相关，进 irr 桶
+	miss := mk(0.02, 0.5)
+	miss.Chunk.StartOffset, miss.Chunk.EndOffset = 100, 105
+	collectScores(samples, GroupZH, expects, []types.SearchResult{miss})
+	if len(samples[distRRFIrr]) != 1 || len(samples[distRRFRel]) != 0 {
+		t.Errorf("没命中的结果应进 irr 桶，实际 %+v", samples)
+	}
+}

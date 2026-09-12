@@ -463,6 +463,36 @@ var mutations = []mutation{
 		new:  `e.Grade = GradePartial`,
 	},
 
+	// ---- 分数分布（#52）----
+	{
+		// 把 norel 组的结果混进「不相关」桶：阈值要挡的是"库里根本没答案"，
+		// 混进来会把"查得到但没排好"误当成"查不到"，阈值随之定得过高。
+		name: "eval: norel 组的结果没单独分桶",
+		file: "internal/eval/run.go",
+		old:  `noRel := group == GroupNoRel`,
+		new:  `noRel := false`,
+	},
+	{
+		// norel 组按定义没有期望命中。恢复"必须非空"的校验，
+		// 这一组就再也建不出来——而它是 #52 唯一的实验依据。
+		name: "eval: 要求所有组都有期望命中",
+		file: "internal/eval/load.go",
+		old:  `		if group != GroupNoRel {`,
+		new:  `		if true {`,
+	},
+	{
+		name: "eval: 分数分位数算错一位",
+		file: "internal/eval/metrics.go",
+		old:  `		i := int(math.Ceil(p/100*float64(len(s)))) - 1`,
+		new:  `		i := int(math.Ceil(p/100*float64(len(s))))`,
+	},
+	{
+		name: "eval: 算分数分位数时就地排序了输入",
+		file: "internal/eval/metrics.go",
+		old:  `	s := append([]float64(nil), vs...)`,
+		new:  `	s := vs`,
+	},
+
 	// ---- 相邻片段合并（#50）----
 	{
 		// 序号不相邻也合并：会把"中间没被命中的内容"一并包进来，

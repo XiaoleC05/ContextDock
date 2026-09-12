@@ -75,6 +75,26 @@ func WriteTable(w io.Writer, rep *Report) error {
 		fmt.Fprintln(w)
 	}
 
+	// ---- 分数分布（#52）----
+	if len(rep.ScoreDist) > 0 {
+		fmt.Fprintln(w, "分数分布（判断「能不能做阈值」的依据）：")
+		head := []string{"桶", "样本", "Min", "P50", "P90", "Max"}
+		rows := [][]string{}
+		for _, k := range []string{distRRFRel, distRRFIrr, distRRFNoRel,
+			distCosRel, distCosIrr, distCosNoRel} {
+			b, ok := rep.ScoreDist[k]
+			if !ok || b.N == 0 {
+				continue
+			}
+			rows = append(rows, []string{k, fmt.Sprintf("%d", b.N),
+				fmt.Sprintf("%.4f", b.Min), fmt.Sprintf("%.4f", b.P50),
+				fmt.Sprintf("%.4f", b.P90), fmt.Sprintf("%.4f", b.Max)})
+		}
+		writeAligned(w, head, rows, 1)
+		fmt.Fprintln(w, "  说明：rrf_* 是融合分，cos_* 是原始余弦分；rel=命中，irr=没命中，norel=无答案查询。")
+		fmt.Fprintln(w)
+	}
+
 	// ---- 精确 token 组：词法必须命中 ----
 	writeLexicalRequired(w, rep)
 

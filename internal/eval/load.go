@@ -266,8 +266,13 @@ func validateQuery(q *Query, seq int, group Group, corpus *Corpus, contents map[
 		problems.Addf("%s: kind=%q 不是合法值（direct / indirect / multi-hop）", where, q.Kind)
 	}
 
+	// norel 组按定义就没有期望命中——它期望的是"没有结果"。
+	// 别的组为空则一定是漏标了：那条 query 在任何指标里都会恒为未召回，
+	// 悄悄拉低整体分数而没人知道。
 	if len(q.Expect) == 0 {
-		problems.Addf("%s: 没有任何期望命中（这条 query 在任何指标里都会恒为未召回）", where)
+		if group != GroupNoRel {
+			problems.Addf("%s: 没有任何期望命中（这条 query 在任何指标里都会恒为未召回）", where)
+		}
 		return
 	}
 

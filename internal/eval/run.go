@@ -264,6 +264,12 @@ type Report struct {
 	// 是不是全都来自同一篇。
 	DistinctDocs map[Channel]float64 `json:"distinct_docs,omitempty"`
 
+	// ScoreDist 是 #52 的分数分布：把「相关结果」与「不相关结果」的
+	// RRF 分与原始余弦分各自的分布列出来，"能不能做阈值"就一目了然。
+	//
+	// 键的含义见 scoreDistKeys。
+	ScoreDist map[string]ScoreBand `json:"score_dist,omitempty"`
+
 	// Detail 是逐条明细，Options.KeepDetail 为真时才有内容。
 	Detail []QueryDetail `json:"detail,omitempty"`
 }
@@ -380,6 +386,9 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 	expandedSum := make(map[Channel]float64, len(AllChannels))
 	distinctSum := make(map[Channel]float64, len(AllChannels))
 
+	// #52 的分数分布采集。
+	scoreSamples := map[string][]float64{}
+
 	// 每次检索的耗时，跑完查询后算分位数。
 	// 预分配到查询总数，避免在计时循环里触发扩容——
 	// 扩容本身会体现在被测量的那段代码旁边，虽然不在里面，但没必要冒这个险。
@@ -423,6 +432,12 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 				sc := Score(q.Expect, results, opt.NDCGK)
 				detail.ByChannel[ch] = sc
 				distinctSum[ch] += float64(countDocuments(results))
+
+				// 分数分布只采**融合通道**的：要回答的是
+				// 「给 Agent 的那个分数能不能当阈值用」。
+				if ch == ChannelFused {
+					collectScores(scoreSamples, set.Group, q.Expect, results)
+				}
 
 				if opt.ContextNeighbors > 0 {
 					// 把每条结果的相邻片段也放进候选集，重新算一次召回。
@@ -479,6 +494,13 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		rep.DistinctDocs = make(map[Channel]float64, len(AllChannels))
 		for _, ch := range AllChannels {
 			rep.DistinctDocs[ch] = distinctSum[ch] / n
+		}
+	}
+
+	if len(scoreSamples) > 0 {
+		rep.ScoreDist = make(map[string]ScoreBand, len(scoreSamples))
+		for k, vs := range scoreSamples {
+			rep.ScoreDist[k] = Quantiles(vs)
 		}
 	}
 
@@ -569,4 +591,55 @@ func countDocuments(results []types.SearchResult) int {
 		seen[r.Chunk.Metadata[types.MetadataKeySource]] = struct{}{}
 	}
 	return len(seen)
+}
+
+// scoreDistKeys 是分数分布的键。
+//
+// 命名规则：<分数类型>_<相关性>。分数类型有两种——
+// rrf（融合分，给 Agent 看的那个）与 cos（原始余弦分，DESIGN §10 建议
+// 用来做判断的那个）；相关性有三种——rel（命中）、irr（同一条查询里没命中）、
+// norel（本来就无答案的查询返回的一切）。
+const (
+	distRRFRel   = "rrf_rel"
+	distRRFIrr   = "rrf_irr"
+	distRRFNoRel = "rrf_norel"
+	distCosRel   = "cos_rel"
+	distCosIrr   = "cos_irr"
+	distCosNoRel = "cos_norel"
+)
+
+// collectScores 把一条查询返回的结果按「相关 / 不相关」分桶，记录两种分数。
+//
+// # 为什么把 norel 组单独分一桶
+//
+// 「不相关」有两种来源，性质完全不同：
+//
+//  1. 库里**有**答案，但这条没命中（irr）——它的分数高是正常的
+//  2. 库里**根本没有**答案（norel）——它的一切都是噪声
+//
+// 阈值要挡的是第 2 种。把两者混在一起看，会把"查得到但没排好"
+// 误当成"查不到"，从而把阈值定得过高。
+func collectScores(samples map[string][]float64, group Group, expects []Expect, results []types.SearchResult) {
+	noRel := group == GroupNoRel
+	for _, r := range results {
+		rel := false
+		for _, e := range expects {
+			if covers(r, e) {
+				rel = true
+				break
+			}
+		}
+
+		switch {
+		case noRel:
+			samples[distRRFNoRel] = append(samples[distRRFNoRel], r.Score)
+			samples[distCosNoRel] = append(samples[distCosNoRel], r.VectorScore)
+		case rel:
+			samples[distRRFRel] = append(samples[distRRFRel], r.Score)
+			samples[distCosRel] = append(samples[distCosRel], r.VectorScore)
+		default:
+			samples[distRRFIrr] = append(samples[distRRFIrr], r.Score)
+			samples[distCosIrr] = append(samples[distCosIrr], r.VectorScore)
+		}
+	}
 }

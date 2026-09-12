@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "group": "norel",
+  "title": "语料里没有答案的查询",
+  "queries": [
+    {
+      "id": "nr-001",
+      "query": "如何用 Kubernetes 部署一个 Java 微服务",
+      "kind": "direct",
+      "expect": [],
+      "note": "Corpus 里没有任何 K8s / Java 的内容。README 的已知限制里也把这类问题当反面例子举过。"
+    },
+    {
+      "id": "nr-002",
+      "query": "Python asyncio 的事件循环怎么用",
+      "kind": "direct",
+      "expect": [],
+      "note": "语料是 Go 项目 + Rust 文档，没有 Python。"
+    },
+    {
+      "id": "nr-003",
+      "query": "MySQL 主从复制延迟怎么排查",
+      "kind": "direct",
+      "expect": [],
+      "note": "语料里只有 PostgreSQL。"
+    },
+    {
+      "id": "nr-004",
+      "query": "React useEffect 的依赖数组该怎么写",
+      "kind": "direct",
+      "expect": [],
+      "note": "没有任何前端内容。"
+    },
+    {
+      "id": "nr-005",
+      "query": "Kafka 消息积压了怎么处理",
+      "kind": "direct",
+      "expect": [],
+      "note": "没有任何消息队列内容。"
+    },
+    {
+      "id": "nr-006",
+      "query": "Nginx 反向代理的超时该怎么配",
+      "kind": "direct",
+      "expect": [],
+      "note": "没有任何 Nginx 内容。"
+    },
+    {
+      "id": "nr-007",
+      "query": "Excel 数据透视表怎么做同比分析",
+      "kind": "direct",
+      "expect": [],
+      "note": "刻意放一条**完全跨领域**的，用来看看向量通道会不会硬凑。"
+    },
+    {
+      "id": "nr-008",
+      "query": "怎么给团队做季度绩效面谈",
+      "kind": "direct",
+      "expect": [],
+      "note": "完全非技术话题。如果这条的分数和真正命中时差不多，那分数就毫无判别力。"
+    }
+  ]
+}
