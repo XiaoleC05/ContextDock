@@ -60,6 +60,12 @@ type Store interface {
 	// Documents 列出全部文档。
 	Documents(ctx context.Context) ([]types.Document, error)
 
+	// DocumentByDedupKey 按去重键查找文档。找不到返回 ErrDocumentNotFound。
+	//
+	// 存在的原因见 types.Document.DedupKey()：重复导入要认出"这是同一份东西"，
+	// 而查一次比"先插再查有没有重复"可靠得多——后者在并发下拦不住。
+	DocumentByDedupKey(ctx context.Context, key string) (*types.Document, error)
+
 	// DeleteDocument 删除文档及其全部片段。
 	DeleteDocument(ctx context.Context, documentID int64) error
 

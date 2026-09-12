@@ -45,6 +45,31 @@ type Document struct {
 	// Content 是文档原文，尚未切分。
 	Content string `json:"content"`
 
+	// ContentHash 是 Content 的 sha256（十六进制小写）。
+	//
+	// 它回答的是「这份内容是不是已经导过」——而**不是**「这份文档是谁」。
+	// 后者由 DedupKey 回答，两者的区别见那个字段的说明。
+	ContentHash string `json:"content_hash,omitempty"`
+
+	// DedupKey 是**去重键**：重复导入时靠它认出"这是同一份东西"。
+	//
+	// # 规则：有真实来源就用来源，否则用内容指纹
+	//
+	//	source 是文件路径之类  → "src:" + source
+	//	source 是 inline 或空  → "sha:" + contentHash
+	//
+	// 为什么不能一律用内容指纹：那样"文件改了再导入"会变成**两份文档**，
+	// 旧版本一直留在库里，检索时两版内容都会返回——而用户明明是在更新。
+	//
+	// 为什么不能一律用来源：直接传文本时 source 都是 "inline"，
+	// 两份完全不同的笔记会互相顶掉，只剩最后一份。
+	//
+	// 各条规则的后果都写在 docs/DESIGN.md 里。
+	//
+	// ⚠️ 由 ingest 在导入前填好，**不要让调用方自己拼**——
+	// 拼错了不报错，只是去重悄悄失效。见包级函数 DedupKey()。
+	DedupKey string `json:"dedup_key,omitempty"`
+
 	// Metadata 存放附加信息，例如文件扩展名、标题面包屑等。
 	//
 	// ⚠️ 和 Chunk.Metadata 一样是裸 map，零值为 nil，直接写入会 panic。
@@ -99,4 +124,29 @@ func (d Document) Validate() error {
 func (d Document) String() string {
 	return fmt.Sprintf("Document{id:%d title:%q source:%q content:%d字节}",
 		d.ID, d.Title, d.Source, len(d.Content))
+}
+
+// InlineSource 是"没有真实来源"时的占位值。
+//
+// 用户在对话里直接粘一段文本时用得上——它明确表示「这是 inline 内容，
+// 没有出处」，而不是留空让人分不清"没来源"和"来源是空字符串"。
+const InlineSource = "inline"
+
+// DedupKey 按 Document.DedupKey 那段注释里的规则算出条目对应的去重键。
+//
+// 做成**包级函数**而不是 Document 的方法：字段本身就叫 DedupKey，
+// Go 不允许同名的字段和方法共存。而且它本来也只是这两个入参的纯函数。
+//
+// 之所以收口在这里而不是让各处自己拼：**拼错了不报错**，
+// 只是去重悄悄失效，而失效的表现是"库里慢慢多出一堆重复文档"，
+// 很久之后才会有人发现。
+func DedupKey(source, contentHash string) string {
+	if source != "" && source != InlineSource {
+		return "src:" + source
+	}
+	// 没有真实来源时才退到内容指纹。
+	//
+	// 前缀是必须的：`sha:` 与 `src:` 两种键永远不能相等，
+	// 否则一份 source 恰好叫 "sha:abc..." 的文档会和另一份内容指纹撞上。
+	return "sha:" + contentHash
 }

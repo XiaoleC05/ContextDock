@@ -119,10 +119,10 @@ func (p *Postgres) SaveDocument(ctx context.Context, doc *types.Document, chunks
 	}
 
 	err = tx.QueryRow(ctx,
-		`INSERT INTO document (title, source, content, metadata)
-		 VALUES ($1, $2, $3, $4::jsonb)
+		`INSERT INTO document (title, source, content, metadata, content_hash, dedup_key)
+		 VALUES ($1, $2, $3, $4::jsonb, $5, $6)
 		 RETURNING id`,
-		doc.Title, doc.Source, doc.Content, meta,
+		doc.Title, doc.Source, doc.Content, meta, doc.ContentHash, doc.DedupKey,
 	).Scan(&doc.ID)
 	if err != nil {
 		return nil, fmt.Errorf("store: 插入文档失败: %w", err)
@@ -232,10 +232,46 @@ func (p *Postgres) ChunksByDocument(ctx context.Context, documentID int64) ([]ty
 	return out, nil
 }
 
+// DocumentByDedupKey 实现 Store。
+//
+// 返回 ErrDocumentNotFound 而不是 (nil, nil)：调用方必须能区分
+// 「查过了、确实没有」和「查失败但没报错」——前者要新增，后者要中止。
+func (p *Postgres) DocumentByDedupKey(ctx context.Context, key string) (*types.Document, error) {
+	if key == "" {
+		return nil, ErrDocumentNotFound
+	}
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, title, source, content, metadata, content_hash, dedup_key, created_at
+		   FROM document WHERE dedup_key = $1`, key)
+	if err != nil {
+		return nil, fmt.Errorf("store: 按去重键查文档失败: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("store: 按去重键查文档失败: %w", err)
+		}
+		return nil, ErrDocumentNotFound
+	}
+	var (
+		d       types.Document
+		metaRaw []byte
+	)
+	if err := rows.Scan(&d.ID, &d.Title, &d.Source, &d.Content, &metaRaw,
+		&d.ContentHash, &d.DedupKey, &d.CreatedAt); err != nil {
+		return nil, fmt.Errorf("store: 扫描文档失败: %w", err)
+	}
+	if err := unmarshalMetadata(metaRaw, &d.Metadata); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 // Documents 实现 Store。
 func (p *Postgres) Documents(ctx context.Context) ([]types.Document, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, title, source, content, metadata, created_at
+		`SELECT id, title, source, content, metadata, content_hash, dedup_key, created_at
 		 FROM document ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询文档失败: %w", err)
@@ -248,7 +284,8 @@ func (p *Postgres) Documents(ctx context.Context) ([]types.Document, error) {
 			d       types.Document
 			metaRaw []byte
 		)
-		if err := rows.Scan(&d.ID, &d.Title, &d.Source, &d.Content, &metaRaw, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Source, &d.Content, &metaRaw,
+			&d.ContentHash, &d.DedupKey, &d.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: 扫描文档失败: %w", err)
 		}
 		if err := unmarshalMetadata(metaRaw, &d.Metadata); err != nil {

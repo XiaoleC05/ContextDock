@@ -510,6 +510,43 @@ var mutations = []mutation{
 		new:  `	s := vs`,
 	},
 
+	// ---- 文档去重（#55）----
+	{
+		// 命中重复后不删旧的：库里变成两份，检索时两条一模一样的结果
+		// 并排返回，用户/Agent 无从分辨。
+		name: "ingest: 命中重复时不删旧文档",
+		file: "internal/ingest/ingest.go",
+		old: `	if err := g.store.DeleteDocument(ctx, old.ID); err != nil {
+		return fmt.Errorf("ingest: 替换旧文档失败: %w", err)
+	}`,
+		new: `	_ = old.ID
+	if err := error(nil); err != nil {
+		return fmt.Errorf("ingest: 替换旧文档失败: %w", err)
+	}`,
+	},
+	{
+		// 一律按内容指纹判身份：文件改了再导入会变成**两份文档**，
+		// 旧版本一直留在库里——而用户明明是在更新它。
+		name: "types: 去重键一律用内容指纹（不用来源）",
+		file: "internal/types/document.go",
+		old:  `	if source != "" && source != InlineSource {`,
+		new:  `	if false {`,
+	},
+	{
+		// 一律按来源判身份：直接传文本时 source 都是 "inline"，
+		// 两份完全不同的笔记会互相顶掉，只剩最后一份。
+		name: "types: 去重键一律用来源（inline 会互相顶掉）",
+		file: "internal/types/document.go",
+		old:  `	if source != "" && source != InlineSource {`,
+		new:  `	if true {`,
+	},
+	{
+		name: "ingest: 不算内容指纹",
+		file: "internal/ingest/ingest.go",
+		old:  `	sum := sha256.Sum256([]byte(s))`,
+		new:  `	sum := sha256.Sum256(nil)`,
+	},
+
 	// ---- 相邻片段合并（#50）----
 	{
 		// 序号不相邻也合并：会把"中间没被命中的内容"一并包进来，

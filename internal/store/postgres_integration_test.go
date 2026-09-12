@@ -388,3 +388,83 @@ func vecLiteral(v []float32) string {
 	}
 	return s
 }
+
+// TestIntegrationDocumentByDedupKey 验证按去重键查文档这条 SQL 路径（#55）。
+//
+// 为什么内存版测过了还要测这里：两套实现必须**行为一致**，
+// 而它们的差异恰恰在 SQL 上——列名写错、WHERE 条件写反、
+// 忘了把新列加进 SELECT，这些内存版一个都测不出来。
+func TestIntegrationDocumentByDedupKey(t *testing.T) {
+	p := newTestStore(t)
+	ctx := context.Background()
+
+	doc := &types.Document{
+		Title: "手册", Source: "docs/deploy.md", Content: "内容",
+		ContentHash: "abc123", DedupKey: "src:docs/deploy.md",
+	}
+	chunks := []types.Chunk{{Ordinal: 0, StartOffset: 0, EndOffset: 2, Content: "内容"}}
+	if _, err := p.SaveDocument(ctx, doc, chunks); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	got, err := p.DocumentByDedupKey(ctx, "src:docs/deploy.md")
+	if err != nil {
+		t.Fatalf("按去重键查找失败: %v", err)
+	}
+	if got.ID != doc.ID || got.Title != "手册" {
+		t.Errorf("查回的文档不对：%+v", got)
+	}
+	// 新加的列必须真的被读回来——只写不读的话，
+	// 上层拿到的 DedupKey 永远是空串，而去重依赖它。
+	if got.ContentHash != "abc123" || got.DedupKey != "src:docs/deploy.md" {
+		t.Errorf("content_hash / dedup_key 没有读回来：%+v", got)
+	}
+
+	if _, err := p.DocumentByDedupKey(ctx, "src:不存在.md"); !errors.Is(err, ErrDocumentNotFound) {
+		t.Errorf("查不到时应返回 ErrDocumentNotFound，实际 %v", err)
+	}
+}
+
+// TestIntegrationDedupKeyUnique 验证唯一索引真的挡得住重复。
+//
+// 应用层的"先查再插"在并发下拦不住——两个事务都会查不到、然后都插入。
+// 唯一的保证只能来自数据库。
+func TestIntegrationDedupKeyUnique(t *testing.T) {
+	p := newTestStore(t)
+	ctx := context.Background()
+
+	save := func(title string) error {
+		_, err := p.SaveDocument(ctx,
+			&types.Document{
+				Title: title, Source: "docs/a.md", Content: "内容",
+				DedupKey: "src:docs/a.md",
+			},
+			[]types.Chunk{{Ordinal: 0, StartOffset: 0, EndOffset: 2, Content: "内容"}})
+		return err
+	}
+
+	if err := save("第一份"); err != nil {
+		t.Fatalf("首次保存失败: %v", err)
+	}
+	if err := save("第二份"); err == nil {
+		t.Error("同一个去重键插入两次应当被唯一索引拦住")
+	}
+}
+
+// TestIntegrationEmptyDedupKeyNotConstrained 验证空去重键不受唯一约束。
+//
+// 去重是 ingest 层的职责，store 是更下面的一层——有人会直接调
+// SaveDocument 传一个没算过去重键的文档。那些文档不该互相冲突。
+func TestIntegrationEmptyDedupKeyNotConstrained(t *testing.T) {
+	p := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		_, err := p.SaveDocument(ctx,
+			&types.Document{Title: fmt.Sprintf("无键 %d", i), Content: "内容"},
+			[]types.Chunk{{Ordinal: 0, StartOffset: 0, EndOffset: 2, Content: "内容"}})
+		if err != nil {
+			t.Fatalf("第 %d 篇（无去重键）保存失败: %v", i+1, err)
+		}
+	}
+}

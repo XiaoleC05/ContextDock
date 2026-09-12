@@ -96,10 +96,23 @@ jobs:
       # service 容器和 job 在同一个网络里，所以直接用 localhost。
       # 建表脚本挂在 runner 上不会被 service 容器执行（那只认容器内的
       # docker-entrypoint-initdb.d），所以这里手动跑一遍。
+      # 按文件名顺序应用**全部**迁移，不是只跑 001。
+      #
+      # ⚠️ 这里原来写死了 001_init.sql。后果不是"少跑一步"那么简单：
+      # 集成测试会照常通过（它只用到 001 建的表），而**线上要跑的
+      # 后续迁移从来没在 CI 里验证过**——002 的回填、003 的列与索引
+      # 都是这样漏掉的。等真的在别人机器上执行时才发现写错了。
+      #
+      # ON_ERROR_STOP=1 也是必须的：不加的话 psql 遇到错误照样退出 0，
+      # 迁移失败会被当成成功，后面所有步骤都建在坏掉的基础上。
       - name: Apply migrations
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d contextdock -f migrations/001_init.sql
+        run: |
+          for f in migrations/*.sql; do
+            echo "→ $f"
+            psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d contextdock -f "$f"
+          done
 
       - name: Run integration tests
         env:

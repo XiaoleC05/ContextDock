@@ -136,7 +136,17 @@ cp .env.example .env      # 然后把 SILICONFLOW_API_KEY 填进去
 
 ### 从旧版本升级
 
-只对 v1.0.0 **之前**导入过文档的库有意义，全新安装跳过。
+**先建表，再升级**。已经跑过 `001_init.sql` 的库需要补上后续迁移：
+
+```bash
+docker exec -i contextdock-pg psql -U postgres -d contextdock     < migrations/003_document_dedup.sql
+```
+
+> ⚠️ 它给存量文档发 `legacy:<id>` 作为去重键，**永远匹配不上新导入**。
+> 也就是说存量文档重新导入一次会多出一份，需要人工清理一次——
+> 这比"自动替换掉一份不确定是哪份的旧记录"安全。见 [DESIGN §13](docs/DESIGN.md)。
+
+下面这条只对 v1.0.0 **之前**导入过文档的库有意义，全新安装跳过。
 
 那些片段的元数据里没有 `source`，检索结果的溯源字段会是空的。跑一次回填补齐：
 
@@ -160,6 +170,7 @@ docker exec -i contextdock-pg psql -U postgres -d contextdock \
 - **可测的检索核心**：`FakeEmbedder` 不访问网络，BM25 与向量检索都能在纯内存里跑测试
 - **逐级降级**：嵌入接口挂了不会让检索整个失败，关键词检索仍然顶上，并在结果里标注降级原因
 - **相邻片段合并**：同一处内容连着命中好几条时合并成一条，让 top-k 覆盖到更多文档
+- **重复导入去重**：同一份文档导入两次会**替换**而不是新增，库里不会出现两条一样的结果
 - **MCP stdio 接入**：两个工具 `import_document` / `search_knowledge_base`
 
 ---

@@ -123,6 +123,29 @@ func (m *Memory) ChunksByDocument(ctx context.Context, documentID int64) ([]type
 	return out, nil
 }
 
+// DocumentByDedupKey 实现 Store。
+func (m *Memory) DocumentByDedupKey(ctx context.Context, key string) (*types.Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, ErrDocumentNotFound
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// 线性扫描。内存版是给测试和小规模场景用的，
+	// 而"文档数"在这里通常是几十条——为它维护一张索引表不划算。
+	for _, d := range m.docs {
+		if d.DedupKey == key {
+			cp := d
+			return &cp, nil
+		}
+	}
+	return nil, ErrDocumentNotFound
+}
+
 // Documents 实现 Store。
 func (m *Memory) Documents(ctx context.Context) ([]types.Document, error) {
 	if err := ctx.Err(); err != nil {
