@@ -66,6 +66,17 @@ func run() error {
 		cache  = flag.String("cache", ".evalcache",
 			"嵌入缓存目录；设为空串则关闭缓存（会慢很多，但数字不变）")
 		quiet = flag.Bool("quiet", false, "不打印导入进度")
+
+		// ⚠️ 这个开关只给 CI 的回归门禁用，**不能用来出报告数字**。
+		// 假嵌入的向量没有语义，跑出来的 recall 只反映"排序流程"，
+		// 不反映检索质量。名字里带 "fake" 是为了让人一眼看出它可疑。
+		fakeEmbed = flag.Bool("fake-embed", false,
+			"[仅 CI] 用确定性假嵌入代替真实 API，不花钱也不联网；数字无质量含义")
+
+		// 回归门禁（#57）。
+		gateFile  = flag.String("gate", "", "与这份基线比对，指标掉超过 -tolerance 就退出非 0")
+		tolerance = flag.Float64("tolerance", 0.05, "门禁允许的下降幅度")
+		writeGate = flag.String("write-gate", "", "把本次结果写成基线文件（有意的改进之后才做）")
 	)
 	flag.Parse()
 
@@ -120,6 +131,8 @@ func run() error {
 
 	// -corpus 排在组装 embedder **之前**：它只切分不嵌入，
 	// 所以既不需要 API Key，也不该因为缺 Key 而失败。
+	var emb embed.Embedder
+
 	if *corpus {
 		st, err := eval.DescribeCorpus(suite, opt)
 		if err != nil {
@@ -128,9 +141,16 @@ func run() error {
 		return eval.WriteCorpusState(os.Stdout, st, *asJSON)
 	}
 
-	emb, err := buildEmbedder(*root, *cache)
-	if err != nil {
-		return err
+	if *fakeEmbed {
+		// 假嵌入必须**关掉缓存**：缓存的键是（模型名，文本），
+		// 而假嵌入的"模型名"在真实缓存里没有对应物——开着的话
+		// 会去读一个不存在的目录，白白慢一点，而且让人以为用过缓存。
+		emb = embed.NewFake()
+	} else {
+		emb, err = buildEmbedder(*root, *cache)
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -145,6 +165,26 @@ func run() error {
 	rep, err := eval.Run(ctx, suite, emb, opt, logf)
 	if err != nil {
 		return err
+	}
+
+	if *writeGate != "" {
+		g := eval.BuildGate(rep, "由 cmd/eval -write-gate 生成；跑的是假嵌入，数字无质量含义")
+		if err := eval.WriteGate(*writeGate, g); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "已写入基线 %s\n", *writeGate)
+	}
+
+	// 门禁在**输出之前**判：CI 里要的是退出码，输出是给人看的补充。
+	if *gateFile != "" {
+		base, err := eval.LoadGate(*gateFile)
+		if err != nil {
+			return err
+		}
+		if err := eval.CheckGate(base, eval.BuildGate(rep, ""), *tolerance); err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "质量门禁通过：各项指标都没有明显下降。")
 	}
 
 	if *asJSON {

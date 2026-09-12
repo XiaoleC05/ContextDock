@@ -177,3 +177,34 @@ func TestDescribeCorpusRespectsParams(t *testing.T) {
 			big.TotalChunks, small.TotalChunks)
 	}
 }
+
+func TestLoadRejectsChunkCountDrift(t *testing.T) {
+	// 清单里记的片段数与实际切分结果不符 → 报错。
+	//
+	// ⚠️ 这条守的不只是"清单写错了"。它顺手拦住了更要紧的一件事：
+	// **改了切分逻辑却没重打指纹**。那种情况下评测数字会悄悄变化，
+	// 而没有任何东西会提醒——#47 之后真实发生过一次
+	// （chunks_at_default 从 196 变成 203，过了很久才发现）。
+	root := setupTree(t, map[string]string{
+		"zh.json": zhSet(`{"id":"zh-001","query":"q","expect":[{"source":"doc.md","quote":"结尾"}]}`),
+	}, corpusDoc)
+
+	// 把清单里的片段数改成错的。
+	manifest := filepath.Join(root, "eval", CorpusManifest)
+	raw, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := strings.Replace(string(raw), `"sha256"`, `"chunks_at_default": 999, "sha256"`, 1)
+	write(t, manifest, fixed)
+
+	_, err = Load(root)
+	if err == nil {
+		t.Fatal("片段数与清单不符应当报错")
+	}
+	for _, want := range []string{"doc.md", "999", "-stamp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("错误里应出现 %q（要告诉人怎么修），实际:\n%v", want, err)
+		}
+	}
+}

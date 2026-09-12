@@ -310,6 +310,20 @@ go run ./cmd/smoke bin/contextdock.exe
 **嵌入失败时的降级链路**，以及溯源字段过完序列化之后还在不在。
 单元测试覆盖不到的接缝（比如 stdout 被日志污染）只有这里能发现。
 
+### 检索质量回归门禁
+
+CI 里除了「能编译、测试能过」，还多跑一条**盯质量**的检查：
+
+```bash
+go run ./cmd/eval -fake-embed -quiet -gate eval/gate.json
+```
+
+它跑的是**假嵌入**，所以不需要 API Key、不联网、完全确定。
+抓不住"语义召回变差"，但抓得住"排序被改坏"——实测把 RRF 的排序反转，
+融合 recall 会从 0.490 掉到 0.020，门禁立刻变红。
+
+见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md) 的 #57 一节。
+
 ### 测试有效性用变异测试验证
 
 **覆盖率高不代表测试有效。** 本项目用 `cmd/mutate` 故意在源码里植入 bug，确认测试会失败：

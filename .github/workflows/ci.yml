@@ -46,6 +46,23 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
 
       # 检查有没有把密钥误提交进来
+      # 检索质量门禁（#57）。
+      #
+      # 这是唯一一道**盯质量**的检查——其余步骤保证的是"能编译、测试能过"，
+      # 而一个看起来无害的重构完全可能让 recall 掉 10 个点、测试照样全绿。
+      #
+      # 两条命令，各管一件事：
+      #   1. -validate  评测集与语料本身有没有问题（含片段数与清单是否一致）
+      #   2. -gate      检索质量有没有比基线明显下降
+      #
+      # ⚠️ 跑的是**假嵌入**，所以不需要 API Key、不联网、完全确定。
+      # 它抓不住"语义召回变差了"，但抓得住"排序被改坏"——
+      # 实测把 RRF 的排序反转，融合 recall 会从 0.490 掉到 0.020。
+      - name: Retrieval quality gate
+        run: |
+          go run ./cmd/eval -validate
+          go run ./cmd/eval -fake-embed -quiet -gate eval/gate.json
+
       - name: Check for leaked secrets
         run: |
           if git ls-files | grep -qE '(^|/)\.env$'; then

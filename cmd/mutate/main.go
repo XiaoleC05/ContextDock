@@ -529,6 +529,49 @@ var mutations = []mutation{
 		new:  `		text, ok := "", false`,
 	},
 
+	// ---- 质量门禁（#57）----
+	{
+		// 门禁永不报警：指标掉多少都放过去，等于没有门禁。
+		name: "gate: 指标大幅下降也不报警",
+		file: "internal/eval/gate.go",
+		old:  `		if want-got > tolerance {`,
+		new:  `		if false {`,
+	},
+	{
+		// 门禁对任何波动都报警：每次提交都红，最后会被人关掉。
+		name: "gate: 指标没掉也报警",
+		file: "internal/eval/gate.go",
+		old:  `		if want-got > tolerance {`,
+		new:  `		if true {`,
+	},
+	{
+		// 不排序：map 遍历顺序随机，同一份数据两次跑报出不同的第一项，
+		// 对比输出时会以为改了东西。
+		name: "gate: 报错顺序不确定（不排序）",
+		file: "internal/eval/gate.go",
+		// 用「永远不交换」的排序代替真排序：保留 map 的随机遍历顺序，
+		// 而 sort 包仍然被引用（换成 `_ = keys` 会编译不过，变异会被判 BROKEN）。
+		old: `	sort.Strings(keys)`,
+		new: `sort.Slice(keys, func(i, j int) bool { return false })`,
+	},
+	{
+		// 缺指标时静默跳过：那条指标**再也不设防**了，而门禁看起来一切正常。
+		name: "gate: 基线里有而本次没有的指标被静默跳过",
+		file: "internal/eval/gate.go",
+		old: `		got, ok := cur.Metrics[k]
+		if !ok {`,
+		new: `		got, ok := cur.Metrics[k]
+		if false {`,
+	},
+	{
+		// 不核对片段数：改了切分逻辑却不重打指纹，评测数字会悄悄变化
+		// 而没有任何提醒。
+		name: "eval: 不核对语料片段数与清单是否一致",
+		file: "internal/eval/load.go",
+		old:  `		if got != f.ChunksAtDefault {`,
+		new:  `		if false {`,
+	},
+
 	// ---- 文档去重（#55）----
 	{
 		// 命中重复后不删旧的：库里变成两份，检索时两条一模一样的结果
