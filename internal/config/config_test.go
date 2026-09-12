@@ -98,6 +98,92 @@ func TestLoadDistinguishesUnsetFromEmpty(t *testing.T) {
 	}
 }
 
+// TestFakeEmbedderWaivesAPIKey 验证开了假嵌入就不要求 API Key。
+//
+// 这是「clone 完不填 key 也能跑通」这条路径的全部依据：
+// 缺了它，第一次跑的人会先撞上 ErrMissingAPIKey。
+func TestFakeEmbedderWaivesAPIKey(t *testing.T) {
+	// 注意：这里连 EnvSiliconFlowAPIKey 这个键都不存在，
+	// 而不只是值为空——要和「设置了但没填」区分开。
+	cfg, err := LoadWith(env(map[string]string{
+		EnvFakeEmbedder:   "true",
+		EnvUseMemoryStore: "true",
+	}))
+	if err != nil {
+		t.Fatalf("开了假嵌入就不该要求 API Key，实际报错: %v", err)
+	}
+	if !cfg.FakeEmbedder {
+		t.Error("FakeEmbedder 应为 true")
+	}
+	if cfg.SiliconFlowAPIKey != "" {
+		t.Errorf("没配 Key 时应为空，实际 %q", cfg.SiliconFlowAPIKey)
+	}
+}
+
+// TestFakeEmbedderOffStillRequiresAPIKey 守住默认路径没有被放松。
+//
+// ⚠️ 这条比 TestLoadRequiresAPIKey 更严格一点：它显式把开关设成 false，
+// 确认「写了这个变量但设成假」不会意外绕开校验。
+func TestFakeEmbedderOffStillRequiresAPIKey(t *testing.T) {
+	_, err := LoadWith(env(map[string]string{
+		EnvFakeEmbedder:   "false",
+		EnvUseMemoryStore: "true",
+	}))
+	if !errors.Is(err, ErrMissingAPIKey) {
+		t.Errorf("开关为 false 时仍然必须要求 API Key，实际 %v", err)
+	}
+}
+
+// TestFakeEmbedderDoesNotWaiveStore 验证假嵌入只豁免 Embedding 这一项。
+//
+// 假嵌入不联网，但它和「数据存哪儿」毫无关系。如果这里放行了，
+// 用户会拿到一个"启动了但一查就崩"的进程——比启动期报错难查得多。
+func TestFakeEmbedderDoesNotWaiveStore(t *testing.T) {
+	_, err := LoadWith(env(map[string]string{
+		EnvFakeEmbedder:   "true",
+		EnvUseMemoryStore: "false",
+		// 故意不设 EnvDatabaseURL
+	}))
+	if !errors.Is(err, ErrMissingDatabaseURL) {
+		t.Errorf("假嵌入不该豁免数据库校验，实际 %v", err)
+	}
+}
+
+// TestFakeEmbedderKeepsKeyWhenAlsoSet 验证两者同时存在时 Key 被保留。
+//
+// 保留不是为了用，而是为了 String() 能显示「已设置，N 字符」——
+// 让人一眼确认自己是"忘了删 Key"而不是"Key 被吞了"。
+func TestFakeEmbedderKeepsKeyWhenAlsoSet(t *testing.T) {
+	cfg, err := LoadWith(env(map[string]string{
+		EnvFakeEmbedder:      "true",
+		EnvSiliconFlowAPIKey: "sk-still-here",
+		EnvUseMemoryStore:    "true",
+	}))
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if cfg.SiliconFlowAPIKey != "sk-still-here" {
+		t.Errorf("Key 应被保留，实际 %q", cfg.SiliconFlowAPIKey)
+	}
+}
+
+// TestFakeEmbedderShowsInString 验证日志里能看出跑的是哪条路。
+//
+// 假嵌入下检索质量无意义，如果 String() 不体现它，
+// 一份看起来正常的启动日志会掩盖"结果为什么这么差"。
+func TestFakeEmbedderShowsInString(t *testing.T) {
+	cfg, err := LoadWith(env(map[string]string{
+		EnvFakeEmbedder:   "true",
+		EnvUseMemoryStore: "true",
+	}))
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if !strings.Contains(cfg.String(), "fakeEmbedder:true") {
+		t.Errorf("String() 应体现假嵌入已开启，实际 %q", cfg.String())
+	}
+}
+
 // TestLoadRequiresDatabaseURL 验证选了 postgres 就必须有连接串。
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	m := minimal(nil)
