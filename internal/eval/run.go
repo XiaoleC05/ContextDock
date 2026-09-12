@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -74,7 +75,41 @@ type Options struct {
 
 	// KeepDetail 为真时在报告里保留逐条查询的明细。
 	KeepDetail bool `json:"-"`
+
+	// Store 是检索后端：StoreMemory（默认）或 StorePostgres。
+	//
+	// ⚠️ 换后端**会改变检索结果**，这正是它存在的理由：
+	// pgvector 后端走 HNSW 近似索引，可能漏掉真正的最近邻；
+	// 内存后端是精确的暴力扫描。两边的数字**不可直接比**，
+	// 要的就是它们的差。见本文件顶上「为什么用内存存储」那段。
+	Store string `json:"store,omitempty"`
+
+	// DatabaseURL 是 postgres 后端的连接串。
+	//
+	// ⚠️ `json:"-"`：Options 会被序列化进 Report，而连接串里有口令。
+	// 报告是要被贴进 issue、提交进仓库的。
+	DatabaseURL string `json:"-"`
+
+	// Reset 允许在开跑前清空目标库。
+	//
+	// 不做成默认行为：本项目的开发库和评测库常常是同一个，
+	// 自动 TRUNCATE 会**毁掉别人的数据**。库里非空且没开这个开关时
+	// 评测直接失败，并要求显式确认。
+	Reset bool `json:"-"`
+
+	// EfSearch 是 postgres 后端的 HNSW 搜索宽度（0 表示用默认值）。
+	// 只影响 postgres 后端；内存后端是精确检索，没有这个旋钮。
+	EfSearch int `json:"ef_search,omitempty"`
 }
+
+// 检索后端。
+const (
+	// StoreMemory 是进程内暴力扫描。精确、不依赖数据库、可进 CI。
+	StoreMemory = "memory"
+
+	// StorePostgres 是把近邻检索下推到 pgvector，走 HNSW 索引。
+	StorePostgres = "postgres"
+)
 
 // describe 把检索结果转成报告用的位置描述。
 func describe(results []types.SearchResult, expects []Expect) []RetrievedItem {
@@ -137,6 +172,12 @@ func (o Options) Normalize() Options {
 	if o.MergeAdjacent == nil {
 		v := config.DefaultMergeAdjacent
 		o.MergeAdjacent = &v
+	}
+	if o.Store == "" {
+		// 默认内存后端。这不只是"省事"：CI 的质量门禁靠它——
+		// 评测**不依赖数据库**才进得了 CI（#57）。
+		// 改用 postgres 是显式的选择，因为它会让数字和基线不可比。
+		o.Store = StoreMemory
 	}
 	return o
 }
@@ -307,6 +348,64 @@ type GroupReport struct {
 // 那时评测必须改成对着真实数据库跑，否则会漏掉近似索引带来的召回损失。
 //
 // 副产品是评测**不依赖 Docker**，可以进 CI（#57）。
+// buildStore 按 Options 组装检索后端。
+func buildStore(ctx context.Context, opt Options, logf func(string, ...any)) (store.Store, error) {
+	switch opt.Store {
+	case "", StoreMemory:
+		return store.NewMemory(), nil
+
+	case StorePostgres:
+		if opt.DatabaseURL == "" {
+			return nil, errors.New("eval: -store=postgres 需要 -dsn，" +
+				"或者环境变量 CONTEXTDOCK_DATABASE_URL")
+		}
+		p, err := store.NewPostgres(ctx, opt.DatabaseURL, 8, opt.EfSearch)
+		if err != nil {
+			return nil, err
+		}
+		if err := prepareEvalDB(ctx, p, opt.Reset, logf); err != nil {
+			_ = p.Close()
+			return nil, err
+		}
+		return p, nil
+
+	default:
+		return nil, fmt.Errorf("eval: 未知的 -store=%q（可选 %s / %s）",
+			opt.Store, StoreMemory, StorePostgres)
+	}
+}
+
+// prepareEvalDB 保证评测跑在一个**干净**的库上。
+//
+// ⚠️ 内存后端每次都是空的，postgres 不是。残留的行会让指标建立在
+// 「和报告里声明的语料不一样」的数据上，而**报告完全看不出来**——
+// 数字照常打印，只是它们算的不是你以为的那个集合。
+//
+// 但也不能自动清空：本项目的开发库和评测库常常是同一个
+// （docker compose 起的那个），自动 TRUNCATE 会毁掉真实数据。
+// 所以库里非空且没显式要求清空时，**直接失败并要人确认**。
+func prepareEvalDB(ctx context.Context, p *store.Postgres, allowReset bool,
+	logf func(string, ...any)) error {
+
+	var n int
+	if err := p.Pool().QueryRow(ctx, `SELECT count(*) FROM chunk`).Scan(&n); err != nil {
+		return fmt.Errorf("eval: 统计 chunk 行数失败: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	if !allowReset {
+		return fmt.Errorf("eval: 目标库里已有 %d 个片段，评测必须跑在干净的库上。\n"+
+			"确认这是评测专用的库之后，加 -store-reset 让它清空；\n"+
+			"或者换一个空库（-dsn 指向别处）。", n)
+	}
+	logf("清空目标库（%d 个片段）…", n)
+	if _, err := p.Pool().Exec(ctx, `TRUNCATE document RESTART IDENTITY CASCADE`); err != nil {
+		return fmt.Errorf("eval: 清空目标库失败: %w", err)
+	}
+	return nil
+}
+
 func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, logf func(string, ...any)) (*Report, error) {
 	opt = opt.Normalize()
 	if logf == nil {
@@ -318,13 +417,21 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		ChunkOverlap:   opt.Overlap,
 		TopK:           opt.TopK,
 		SearchTimeout:  60 * time.Second,
-		UseMemoryStore: true,
+		UseMemoryStore: opt.Store != StorePostgres,
+		DatabaseURL:    opt.DatabaseURL,
+		HNSWEfSearch:   opt.EfSearch,
 		PoolMaxConns:   8,
 		EmbeddingDim:   types.EmbeddingDim,
 		TokenizeScheme: opt.TokenizeScheme,
 		MergeAdjacent:  *opt.MergeAdjacent,
 	}
-	svc, err := service.New(cfg, emb, store.NewMemory())
+	st, err := buildStore(ctx, opt, logf)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = st.Close() }()
+
+	svc, err := service.New(cfg, emb, st)
 	if err != nil {
 		return nil, fmt.Errorf("eval: 组装服务失败: %w", err)
 	}

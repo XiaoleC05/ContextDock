@@ -41,6 +41,12 @@ const (
 	//
 	// 它同时**豁免** EnvSiliconFlowAPIKey 这条必填校验——假嵌入不联网。
 	EnvFakeEmbedder = "CONTEXTDOCK_FAKE_EMBEDDER"
+
+	// EnvHNSWEfSearch 是 HNSW 索引的搜索宽度（pgvector 的 hnsw.ef_search）。
+	//
+	// 它不改变召回**排序**，只决定「找得多宽」：值越小越快、
+	// 但可能漏掉真正的近邻。pgvector 的默认值是 40，偏低。
+	EnvHNSWEfSearch = "CONTEXTDOCK_HNSW_EF_SEARCH"
 )
 
 // 默认值。
@@ -64,6 +70,18 @@ const (
 	//
 	// 上限由输出体积决定，不由"能带几段"决定——见 mcp 包里的截断说明。
 	DefaultContextNeighbors = 1
+
+	// DefaultHNSWEfSearch 是 HNSW 搜索宽度的默认值。
+	//
+	// 取 100 而不是 pgvector 的默认 40：docs/PITFALLS.md 记着这个值
+	// 偏低、建议 100 起步再用真实查询集测 recall 后定。**这个默认值是
+	// 起点不是结论**——`cmd/eval -store=postgres` 跑过 ef_search 扫描
+	// 之后，结论写进 BENCHMARKS.md。
+	//
+	// ⚠️ 它必须 >= 单次检索要取的候选数（topK × mult），否则候选池被
+	// 截断、召回悄悄下降。实现里按 max(本值, 候选数) 兜底，见
+	// store.Postgres.SearchByEmbedding。
+	DefaultHNSWEfSearch = 100
 
 	// DefaultMergeAdjacent 是相邻片段合并的默认开关。
 	//
@@ -106,6 +124,12 @@ type Config struct {
 	UseMemoryStore bool
 	DatabaseURL    string
 	PoolMaxConns   int32
+
+	// HNSWEfSearch 是向量近邻检索的搜索宽度（pgvector 的 hnsw.ef_search）。
+	//
+	// 只在 pgvector 后端生效：内存暴力扫描是精确的，没有这个旋钮。
+	// 实现会按 max(本值, topK×mult) 兜底，避免候选池被截断。
+	HNSWEfSearch int
 
 	// 检索
 	TopK          int
@@ -177,6 +201,7 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		MergeAdjacent:      DefaultMergeAdjacent,
 		PoolMaxConns:       DefaultPoolMaxConns,
 		EmbeddingDim:       types.EmbeddingDim,
+		HNSWEfSearch:       DefaultHNSWEfSearch,
 	}
 
 	// ---- 假嵌入开关 ----
@@ -263,6 +288,9 @@ func LoadWith(getenv Getenv) (*Config, error) {
 	if cfg.ContextNeighbors, err = intVar(getenv, EnvContextNeighbors, cfg.ContextNeighbors); err != nil {
 		return nil, err
 	}
+	if cfg.HNSWEfSearch, err = intVar(getenv, EnvHNSWEfSearch, cfg.HNSWEfSearch); err != nil {
+		return nil, err
+	}
 	if n, err := intVar(getenv, EnvPoolMaxConns, int(cfg.PoolMaxConns)); err != nil {
 		return nil, err
 	} else {
@@ -321,6 +349,11 @@ func (c *Config) Validate() error {
 	if c.PoolMaxConns <= 0 {
 		return fmt.Errorf("%w: PoolMaxConns 必须为正数，实际 %d", ErrBadValue, c.PoolMaxConns)
 	}
+	// ef_search 必须为正。它同时是「搜索宽度」的下界，
+	// 0 会让实现退化成只返回极少数候选，而看起来毫无异常。
+	if c.HNSWEfSearch <= 0 {
+		return fmt.Errorf("%w: HNSWEfSearch 必须为正数，实际 %d", ErrBadValue, c.HNSWEfSearch)
+	}
 	return nil
 }
 
@@ -331,11 +364,11 @@ func (c *Config) Validate() error {
 func (c Config) String() string {
 	return fmt.Sprintf(
 		"Config{model:%s baseURL:%s fakeEmbedder:%v apiKey:%s db:%s memoryStore:%v "+
-			"topK:%d timeout:%v chunk:%d/%d poolMaxConns:%d}",
+			"topK:%d timeout:%v chunk:%d/%d poolMaxConns:%d hnswEfSearch:%d}",
 		c.EmbeddingModel, c.SiliconFlowBaseURL, c.FakeEmbedder,
 		maskSecret(c.SiliconFlowAPIKey),
 		maskSecret(c.DatabaseURL), c.UseMemoryStore, c.TopK, c.SearchTimeout,
-		c.ChunkMaxRunes, c.ChunkOverlap, c.PoolMaxConns)
+		c.ChunkMaxRunes, c.ChunkOverlap, c.PoolMaxConns, c.HNSWEfSearch)
 }
 
 // maskSecret 只保留长度信息，不泄露内容。

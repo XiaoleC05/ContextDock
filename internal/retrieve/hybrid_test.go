@@ -38,7 +38,7 @@ type stubVector struct {
 	mu      sync.Mutex
 }
 
-func (s *stubVector) Search(_ []float32, _ int) ([]types.SearchResult, error) {
+func (s *stubVector) Search(_ context.Context, _ []float32, _ int) ([]types.SearchResult, error) {
 	s.mu.Lock()
 	s.calls++
 	s.mu.Unlock()

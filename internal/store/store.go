@@ -79,3 +79,36 @@ type Store interface {
 	// Close 释放资源（连接池等）。
 	Close() error
 }
+
+// EmbeddingSearcher 是存储**可选**的向量检索能力。
+//
+// 实现了它的存储可以直接在库内做近邻检索，不必把全部向量读进内存。
+// 目前只有 *Postgres 实现。
+//
+// # 为什么是独立接口，而不是并进 Store
+//
+// 并进 Store 会逼着 *Memory 也实现一份，而那意味着它要在
+// SaveDocument / SaveEmbeddings / DeleteDocument 里同步维护第二份
+// 派生状态——一处「必须保持同步、错了不报错、只是结果变差」的状态。
+// 内存路径已经有 retrieve.VectorIndex 承担同样的职责（Service 在
+// 没有 EmbeddingSearcher 时就用它），没必要再来一份。
+//
+// 因此内存路径的暴力扫描是**对照组基线**，不是临时方案。
+//
+// # 语义契约（两套实现必须一致）
+//
+//   - 返回**至多** topK 条，按余弦相似度**降序**
+//   - ⚠️ **不保证穷尽**：HNSW 是近似索引，返回条数可能少于 topK。
+//     调用方**不得**假设 len(results) == topK
+//   - 每条结果必须填好：
+//   - Score 与 VectorScore —— 都是**原始余弦相似度**，不是距离
+//   - VectorRank —— 1-based
+//   - Chunk 的 ID / DocumentID / Ordinal / 偏移 / Content / Metadata。
+//     ⚠️ Metadata 尤其不能漏：评测的命中判定读 Metadata["source"]，
+//     漏了会让**所有 recall 静默归零**，而报告照样打印
+//   - 空结果返回**非 nil 的空切片**
+//   - topK <= 0 返回错误。数据库表达不了「不限量」，而静默只返回
+//     ef_search 条会得到一个看起来正常、实则可疑偏小的候选池
+type EmbeddingSearcher interface {
+	SearchByEmbedding(ctx context.Context, query []float32, topK int) ([]types.SearchResult, error)
+}

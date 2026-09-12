@@ -388,9 +388,16 @@ func TestRebuildSwapsIndexesInsteadOfMutating(t *testing.T) {
 		t.Fatalf("导入失败: %v", err)
 	}
 
-	oldBM25, oldVec := svc.snapshot()
+	oldBM25, _, _ := svc.snapshot()
 	oldBM25Len := oldBM25.Len()
+
+	// 向量索引直接从字段取：snapshot 返回的是接口（存储后端下进程里
+	// 根本没有内存向量索引），而这里要断言的恰恰是「那个对象有没有被改写」。
+	svc.idxMu.RLock()
+	oldVec := svc.vecIdx
+	svc.idxMu.RUnlock()
 	oldVecLen := oldVec.Len()
+
 	if oldBM25Len == 0 || oldVecLen == 0 {
 		t.Fatal("前置条件不成立：导入之后索引应当非空")
 	}
@@ -402,10 +409,14 @@ func TestRebuildSwapsIndexesInsteadOfMutating(t *testing.T) {
 		t.Fatalf("导入失败: %v", err)
 	}
 
-	newBM25, newVec := svc.snapshot()
+	newBM25, _, _ := svc.snapshot()
 	if newBM25.Len() <= oldBM25Len {
 		t.Fatalf("重建后索引应当变大：BM25 %d -> %d", oldBM25Len, newBM25.Len())
 	}
+
+	svc.idxMu.RLock()
+	newVec := svc.vecIdx
+	svc.idxMu.RUnlock()
 	if newVec.Len() <= oldVecLen {
 		t.Fatalf("重建后向量索引应当变大：%d -> %d", oldVecLen, newVec.Len())
 	}

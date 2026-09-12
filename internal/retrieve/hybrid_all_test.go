@@ -27,7 +27,7 @@ type fixedVec struct {
 	calls *[]int
 }
 
-func (f fixedVec) Search(_ []float32, topK int) ([]types.SearchResult, error) {
+func (f fixedVec) Search(_ context.Context, _ []float32, topK int) ([]types.SearchResult, error) {
 	if f.calls != nil {
 		*f.calls = append(*f.calls, topK)
 	}
@@ -111,8 +111,8 @@ type vecSearcher struct {
 	n     int
 }
 
-func (s vecSearcher) Search(v []float32, topK int) ([]types.SearchResult, error) {
-	return fixedVec{n: min(s.n, topK), calls: s.calls}.Search(v, topK)
+func (s vecSearcher) Search(ctx context.Context, v []float32, topK int) ([]types.SearchResult, error) {
+	return fixedVec{n: min(s.n, topK), calls: s.calls}.Search(ctx, v, topK)
 }
 
 func zeroVec() []float32 { return make([]float32, types.EmbeddingDim) }

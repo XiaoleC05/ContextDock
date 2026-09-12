@@ -62,6 +62,15 @@ func run() error {
 		mergeAdj = flag.Bool("merge", config.DefaultMergeAdjacent, "相邻片段合并（#50）")
 
 		asJSON = flag.Bool("json", false, "输出机读 JSON 而不是表格")
+
+		storeBackend = flag.String("store", eval.StoreMemory,
+			"检索后端：memory（暴力扫描，精确、不依赖数据库）或 postgres（库内 HNSW 近似检索）")
+		dsn = flag.String("dsn", "",
+			"postgres 后端的连接串；留空则取 "+config.EnvDatabaseURL)
+		storeReset = flag.Bool("store-reset", false,
+			"允许在开跑前清空目标库（**会删数据**）。目标库非空且没开这个开关时评测会直接失败")
+		efSearch = flag.Int("ef-search", 0,
+			"postgres 后端的 HNSW 搜索宽度（hnsw.ef_search），0 表示用默认值")
 		detail = flag.Bool("detail", false, "报告里带上逐条查询明细（供失败分析）")
 		cache  = flag.String("cache", ".evalcache",
 			"嵌入缓存目录；设为空串则关闭缓存（会慢很多，但数字不变）")
@@ -122,6 +131,15 @@ func run() error {
 		ContextNeighbors: *contextN,
 		MergeAdjacent:    mergeAdj,
 		KeepDetail:       *detail || *asJSON,
+		Store:            *storeBackend,
+		Reset:            *storeReset,
+		EfSearch:         *efSearch,
+	}
+	// DSN 优先取 flag；没传就落到环境变量——CI 与
+	// docker compose 那套都用 CONTEXTDOCK_DATABASE_URL。
+	opt.DatabaseURL = *dsn
+	if opt.DatabaseURL == "" {
+		opt.DatabaseURL = os.Getenv(config.EnvDatabaseURL)
 	}
 	if *overlap >= 0 {
 		opt.Overlap = *overlap

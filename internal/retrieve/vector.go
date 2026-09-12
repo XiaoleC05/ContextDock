@@ -1,6 +1,7 @@
 package retrieve
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -59,7 +60,17 @@ func (v *VectorIndex) Index(chunks []types.Chunk) error {
 //
 // 相似度用**余弦相似度**。返回的 SearchResult 里填好了 VectorRank（1-based）
 // 和 VectorScore（原始余弦值，范围 -1~1）。
-func (v *VectorIndex) Search(query []float32, topK int) ([]types.SearchResult, error) {
+//
+// ctx 是 VectorSearcher 接口要求的。内存扫描本身是微秒级的、打断没有收益，
+// 但**开头的 ctx.Err() 检查是必须的**：调用方（hybrid）传下来的是带超时的
+// ctx，已经超时时应当立刻返回错误，而不是白扫一遍再把结果丢掉。
+//
+// ⚠️ 数据库后端（store.EmbeddingSearcher）走的是同一份契约：可能返回
+// **少于 topK** 条。调用方不得假设 len(results) == topK。
+func (v *VectorIndex) Search(ctx context.Context, query []float32, topK int) ([]types.SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(query) != types.EmbeddingDim {
 		return nil, fmt.Errorf("%w: 查询向量 %d 维，期望 %d 维",
 			ErrVectorDim, len(query), types.EmbeddingDim)

@@ -17,8 +17,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/pgvector/pgvector-go"
 
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
@@ -41,7 +45,7 @@ func newTestStore(t *testing.T) *Postgres {
 	t.Helper()
 	ctx := context.Background()
 
-	p, err := NewPostgres(ctx, testDSN(), 4)
+	p, err := NewPostgres(ctx, testDSN(), 4, 0)
 	if err != nil {
 		t.Fatalf("连接数据库失败（容器起来了吗？）: %v", err)
 	}
@@ -289,7 +293,7 @@ func TestIntegrationRebuildIndexAfterRestart(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p2, err := NewPostgres(ctx, testDSN(), 4)
+	p2, err := NewPostgres(ctx, testDSN(), 4, 0)
 	if err != nil {
 		t.Fatalf("重连失败: %v", err)
 	}
@@ -466,5 +470,306 @@ func TestIntegrationEmptyDedupKeyNotConstrained(t *testing.T) {
 		if err != nil {
 			t.Fatalf("第 %d 篇（无去重键）保存失败: %v", i+1, err)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #68 向量检索下推到 HNSW
+// ---------------------------------------------------------------------------
+
+// planQueryVec 造一个确定性的 1024 维向量。
+func planQueryVec(seed float32) []float32 {
+	v := make([]float32, types.EmbeddingDim)
+	for i := range v {
+		v[i] = seed + float32(i)*1e-6
+	}
+	return v
+}
+
+// seedChunks 插入 n 个带向量的片段，返回文档 ID。
+//
+// 走裸 SQL 而不是 SaveDocument/SaveEmbeddings：这个测试关心的是
+// **执行计划**，让插入路径参与进来只会增加噪音。
+func seedChunks(t *testing.T, p *Postgres, n int) int64 {
+	t.Helper()
+	ctx := context.Background()
+
+	var docID int64
+	if err := p.pool.QueryRow(ctx,
+		`INSERT INTO document (title, source, content)
+		 VALUES ('计划测试', 'plan-test', '正文') RETURNING id`,
+	).Scan(&docID); err != nil {
+		t.Fatalf("插入文档失败: %v", err)
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for i := 0; i < n; i++ {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO chunk
+			   (document_id, ordinal, start_offset, end_offset, content, metadata, embedding)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			docID, i, i*10, i*10+10,
+			fmt.Sprintf("片段内容 %d：这是一段用于测试近邻检索的中文文本。", i),
+			[]byte(`{"source":"plan-test"}`),
+			pgvector.NewVector(planQueryVec(float32(i)*0.001)),
+		); err != nil {
+			t.Fatalf("插入第 %d 个片段失败: %v", i, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("提交失败: %v", err)
+	}
+	return docID
+}
+
+// explainANN 跑一次 EXPLAIN（默认设置）并返回计划文本。
+func explainANN(t *testing.T, p *Postgres, q []float32, topK int) string {
+	t.Helper()
+	return explainWith(t, p, q, topK, false)
+}
+
+// explainANNNoSeqScan 在**禁用顺序扫描**的前提下取执行计划。
+//
+// 这是断言「索引可用」的正确姿势，理由见
+// TestIntegrationANNCanUseHNSWIndex 的说明。
+func explainANNNoSeqScan(t *testing.T, p *Postgres, q []float32, topK int) string {
+	t.Helper()
+	return explainWith(t, p, q, topK, true)
+}
+
+// explainWith 跑 EXPLAIN ANALYZE。
+//
+// noSeqScan 为真时在同一个事务里 `SET LOCAL enable_seqscan = off`——
+// 必须是同一个连接，所以走事务而不是直接 pool.Query。
+func explainWith(t *testing.T, p *Postgres, q []float32, topK int, noSeqScan bool) string {
+	t.Helper()
+	ctx := context.Background()
+
+	if !noSeqScan {
+		rows, err := p.pool.Query(ctx, `EXPLAIN (ANALYZE, BUFFERS) `+annQuery,
+			pgvector.NewVector(q), topK)
+		if err != nil {
+			t.Fatalf("EXPLAIN 失败: %v", err)
+		}
+		defer rows.Close()
+		return scanPlan(t, rows)
+	}
+
+	// ⚠️ 必须是**同一个连接**：enable_seqscan 是会话级 GUC。
+	// 直接 pool.Query 会从池里随机取一条连接，SET 未必落在它上面。
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan = off`); err != nil {
+		t.Fatalf("设置 enable_seqscan 失败: %v", err)
+	}
+	rows, err := tx.Query(ctx, `EXPLAIN (ANALYZE, BUFFERS) `+annQuery,
+		pgvector.NewVector(q), topK)
+	if err != nil {
+		t.Fatalf("EXPLAIN 失败: %v", err)
+	}
+	defer rows.Close()
+	return scanPlan(t, rows)
+}
+
+// scanPlan 把 EXPLAIN 的结果行拼成一个字符串。
+//
+// ⚠️ 计划文本里会**原样带出整个查询向量**（1024 个浮点数），
+// 直接打进日志或失败信息里是几千字符的噪声。这里截断掉。
+func scanPlan(t *testing.T, rows pgx.Rows) string {
+	t.Helper()
+	var sb strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("扫描计划失败: %v", err)
+		}
+		sb.WriteString(compactPlanLine(line))
+		sb.WriteString("\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读取计划失败: %v", err)
+	}
+	return sb.String()
+}
+
+// compactPlanLine 把计划行里的向量字面量换成占位符。
+//
+// 不这么做的话，一条失败信息能有两万字符，实际没人在看。
+func compactPlanLine(line string) string {
+	const marker = "'["
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return line
+	}
+	j := strings.Index(line[i:], "]'::vector")
+	if j < 0 {
+		return line
+	}
+	return line[:i] + "'[…]'::vector" + line[i+j+len("]'::vector"):]
+}
+
+// TestIntegrationANNCanUseHNSWIndex 是 #68 的核心验收。
+//
+// **"SQL 写得对"不等于"索引能用上"。** 距离算子写错（`<->` 是 L2、
+// `<#>` 是内积）不会报任何错，只会静默退化成全表扫描——结果一模一样，
+// 索引白建。所以这里断言的是**执行计划**，不是结果。
+//
+// # 为什么断言"能用"而不是"用了"
+//
+// 实测过规划器的选择，结论是**非单调**的，表越大不代表越会用索引：
+//
+//	片段数     默认计划
+//	  1000     顺序扫描
+//	  5000     ✅ HNSW 索引
+//	 20000     顺序扫描
+//
+// 所以「在某个 N 上断言必须走索引」是个会随 pgvector 版本、
+// 统计信息、行宽漂移的脆弱断言。这里改成在
+// `SET LOCAL enable_seqscan = off` 下取计划：**如果算子与算子类
+// 不匹配，即便禁掉顺序扫描它也用不上索引**——这才是会被写错、
+// 且必须被抓到的东西。
+//
+// 两个断言缺一不可：
+//   - 计划里出现 chunk_embedding_hnsw_idx
+//   - 计划里**没有 Sort 节点**：说明索引直接提供了 ORDER BY 的顺序。
+//     只断言前者的话，"扫索引 + 排序"也能通过——那正是算子不匹配的样子
+//
+// 默认计划只记录不断言（`t.Logf`），因为它是规划器的自由，不是契约。
+func TestIntegrationANNCanUseHNSWIndex(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+
+	const n = 5000
+	seedChunks(t, p, n)
+
+	// ⚠️ 规划器需要统计信息才会考虑索引。不 ANALYZE 的话，刚插入的表
+	// 在它眼里"很小"，会直接选顺序扫描——测试会以一个和代码无关的
+	// 原因失败（或者更糟：因为恰好选对了而通过）。
+	if _, err := p.pool.Exec(ctx, `ANALYZE chunk`); err != nil {
+		t.Fatalf("ANALYZE 失败: %v", err)
+	}
+
+	// 记录但不评判：这是规划器在当前规模下的选择，不是接口契约。
+	t.Logf("默认计划（仅记录）：\n%s", explainANN(t, p, planQueryVec(0.5), 10))
+
+	plan := explainANNNoSeqScan(t, p, planQueryVec(0.5), 10)
+
+	if !strings.Contains(plan, "chunk_embedding_hnsw_idx") {
+		t.Errorf("禁用顺序扫描后仍然没有用上 chunk_embedding_hnsw_idx——"+
+			"说明这个查询在结构上就与索引不匹配。检查 ORDER BY 的算子"+
+			"是否与索引的 vector_cosine_ops 一致\n%s", plan)
+	}
+	if strings.Contains(plan, "Sort") {
+		t.Errorf("计划里有 Sort 节点，说明索引**没有**提供 ORDER BY 需要的顺序——"+
+			"正是距离算子与算子类不匹配的症状（索引被扫了个遍却没帮上忙）\n%s", plan)
+	}
+}
+
+// TestIntegrationSearchByEmbeddingContract 验证库内近邻检索满足接口契约。
+//
+// 契约见 store.EmbeddingSearcher 的说明。这里逐条钉住，因为其中几条
+// 一旦破了**不会报错，只会让下游静默算错**：
+//
+//   - Metadata 必须带上：评测的命中判定读 Metadata["source"]，
+//     漏了会让所有 recall 归零，而报告照常打印
+//   - Score 与 VectorScore 必须都是**余弦相似度**（不是距离）：
+//     填反了排序不变、融合结果照常正确，只有暴露给 Agent 的
+//     vector_score 是错的，而没有一个测试抓得到（RRF 不看分数）
+//   - VectorRank 必须 1-based：MatchedBy() 依赖它推导 matched_by
+func TestIntegrationSearchByEmbeddingContract(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+
+	const n = 200
+	seedChunks(t, p, n)
+	if _, err := p.pool.Exec(ctx, `ANALYZE chunk`); err != nil {
+		t.Fatalf("ANALYZE 失败: %v", err)
+	}
+
+	const topK = 10
+	got, err := p.SearchByEmbedding(ctx, planQueryVec(0.1), topK)
+	if err != nil {
+		t.Fatalf("检索失败: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("应当有结果")
+	}
+	if len(got) > topK {
+		t.Errorf("返回 %d 条，超过 topK=%d", len(got), topK)
+	}
+
+	for i, r := range got {
+		if r.VectorRank != i+1 {
+			t.Errorf("第 %d 条的 VectorRank = %d，应当是 1-based 的 %d",
+				i, r.VectorRank, i+1)
+		}
+		if r.Score != r.VectorScore {
+			t.Errorf("第 %d 条的 Score(%v) 与 VectorScore(%v) 不一致——"+
+				"单路结果里这两个都该是原始余弦分", i, r.Score, r.VectorScore)
+		}
+		// 余弦相似度落在 [-1, 1]。超出这个范围说明填的是距离而不是相似度。
+		if r.Score < -1.0001 || r.Score > 1.0001 {
+			t.Errorf("第 %d 条的分数是 %v，超出余弦相似度的取值范围。"+
+				"`<=>` 返回的是**距离**，必须填 1-distance", i, r.Score)
+		}
+		if src := r.Chunk.Metadata[types.MetadataKeySource]; src != "plan-test" {
+			t.Errorf("第 %d 条缺少 source 元数据（得到 %q）。"+
+				"评测的命中判定依赖它，漏了会让所有 recall 静默归零", i, src)
+		}
+		if r.Chunk.ID == 0 || r.Chunk.DocumentID == 0 {
+			t.Errorf("第 %d 条缺少身份字段：ID=%d DocumentID=%d",
+				i, r.Chunk.ID, r.Chunk.DocumentID)
+		}
+		// ⚠️ 不该把 embedding 带出来：检索下游没有任何地方读它，
+		// 带上等于把想省的内存又搬回来。
+		if len(r.Chunk.Embedding) != 0 {
+			t.Errorf("第 %d 条带回了向量（%d 维）——annQuery 不该 select embedding",
+				i, len(r.Chunk.Embedding))
+		}
+	}
+
+	// 降序
+	for i := 1; i < len(got); i++ {
+		if got[i].Score > got[i-1].Score {
+			t.Errorf("结果没有按相似度降序：第 %d 条 %v > 第 %d 条 %v",
+				i, got[i].Score, i-1, got[i-1].Score)
+		}
+	}
+}
+
+// TestIntegrationSearchByEmbeddingRejectsBadInput 验证入参校验。
+func TestIntegrationSearchByEmbeddingRejectsBadInput(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+
+	if _, err := p.SearchByEmbedding(ctx, make([]float32, 100), 10); !errors.Is(err, ErrVectorDim) {
+		t.Errorf("维度不对应当返回 ErrVectorDim，实际 %v", err)
+	}
+	if _, err := p.SearchByEmbedding(ctx, planQueryVec(0), 0); err == nil {
+		t.Error("topK<=0 应当报错（数据库表达不了「不限量」）")
+	}
+	if _, err := p.SearchByEmbedding(ctx, planQueryVec(0), -1); err == nil {
+		t.Error("topK<0 应当报错")
+	}
+
+	// 空库应当返回非 nil 的空切片，而不是 nil
+	got, err := p.SearchByEmbedding(ctx, planQueryVec(0), 10)
+	if err != nil {
+		t.Fatalf("空库检索不该报错: %v", err)
+	}
+	if got == nil {
+		t.Error("空结果应当是空切片而不是 nil——nil 会让序列化出 null")
+	}
+	if len(got) != 0 {
+		t.Errorf("空库应当返回 0 条，实际 %d", len(got))
 	}
 }
