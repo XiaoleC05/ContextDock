@@ -228,6 +228,10 @@ func joinBreadcrumb(titles []string, level int) string {
 
 // chunkSection 把一节正文切成片段，追加到 out。
 func (c *Chunker) chunkSection(runes []rune, sec section, docID int64, ordinal *int, out *[]types.Chunk) {
+	// 保护区（围栏代码块、表格）在**节内**算一次即可：
+	// 它们不会跨节——标题行本身不属于任何一节，围栏块里也不会出现标题。
+	prot := findRegions(runes, sec.start, sec.end)
+
 	pos := sec.start
 	for pos < sec.end {
 		// 跳过片段开头的空白，避免产出以换行开头的片段。
@@ -246,9 +250,16 @@ func (c *Chunker) chunkSection(runes []rune, sec section, docID int64, ordinal *
 		hitEnd := end >= sec.end
 		if hitEnd {
 			end = sec.end
-		} else if brk := lastSentenceBreak(runes, pos, end); brk > pos {
-			end = brk
+		} else {
+			end = c.cutPoint(runes, pos, end, prot)
 		}
+		// ⚠️ 先记下**裁剪之前**的切点。
+		//
+		// 下面会把尾部空白裁掉，而「是否切在保护区起点」必须按裁剪前的
+		// 位置判断：切在块首往往紧跟在换行之后，裁剪会把它退到块前，
+		// 于是那个判断永远不成立，重叠又把起点拉回块前——
+		// 刚保护好的整块又被切开，而报告上看不出任何异常。
+		cutBeforeTrim := end
 		// 去掉末尾空白，但不要退到起点之前。
 		for end > pos+1 && isSpace(runes[end-1]) {
 			end--
@@ -273,6 +284,13 @@ func (c *Chunker) chunkSection(runes []rune, sec section, docID int64, ordinal *
 		}
 		// 回退 overlap 个字符作为下一段的起点。
 		next := end - c.cfg.OverlapRunes
+		// 本片正好在保护区起点结束 → 下一片从块首开始，**不做重叠**。
+		//
+		// 否则重叠会把起点拉到块前，那个块就放不进下一片的窗口里了，
+		// 于是刚保护好的整块又被切开——而报告上看不出任何异常。
+		if _, ok := regionStartingAt(prot, cutBeforeTrim); ok {
+			next = cutBeforeTrim
+		}
 		if next <= pos {
 			// 兜底：必须严格前进，否则死循环。
 			next = pos + 1
@@ -313,4 +331,92 @@ func isSentenceEnd(r rune) bool {
 // 一个只含全角空格的文档会切出一个"看似有内容"的片段，一路通过校验进库。
 func isSpace(r rune) bool {
 	return unicode.IsSpace(r)
+}
+
+// cutPoint 决定这一片在哪里结束。
+//
+// 优先**退到块首**：断点落在保护区中间时退到保护区起点，
+// 让整块从下一片干净地开始，而不是在块中间断一刀。
+//
+// 再配合 chunkSection 里「切在块首就不回退重叠」那条规则，
+// 下一片从块首起算，整块只要不超 MaxRunes 就一定放得下——
+// **"优先整体保留"是这样实现的，不是靠"把整块塞进当前片"**。
+//
+// > 这里原来还有一条「断点落在保护区中间、且整块放得下就整块带走」的分支。
+// > 它是**死代码**：那条分支要求 `regionAt(limit)` 且 `r.end-pos <= MaxRunes`，
+// > 前者蕴含 `r.end > limit`，后者等价于 `r.end <= limit`，两个条件不可能同时成立。
+// > 是变异测试把它逼出来的——把这条分支的条件改成 false，11 条测试一条都没红。
+//
+// # minEnd 这条约束是必须的
+//
+// 下一片的起点是 `end - overlap`。它**必须严格大于 pos**，
+// 否则切分原地打转——而 chunkSection 里那个 `next = pos + 1` 的兜底
+// 只保证不死循环，不保证切得动：它会让一段文字被切成几十个一字宽的碎片，
+// 而**不报任何错**。
+//
+// 这个坑是实测踩出来的：第一版 cutPoint 允许退到「任何 r.start > pos」的
+// 位置，于是退到块首之后下一片又退回到块首之前，两次调用给出同一个 end，
+// 片段数从 196 涨到 313、每个碎片只有几十个字符。指标上表现为
+// 「改了切分之后检索变差」，但根因在切分本身在空转。
+func (c *Chunker) cutPoint(runes []rune, pos, limit int, prot []region) int {
+	// 本片结束位置的下限：保证下一片的起点严格大于 pos。
+	minEnd := pos + c.cfg.OverlapRunes + 1
+
+	cut := lastSentenceBreak(runes, pos, limit)
+	if cut <= pos {
+		cut = limit
+	}
+
+	// 2) 断点落在保护区中间而整块又放不下 → 退到块首。
+	//
+	// 退到块首会让本片变短，所以只有在**退完之后仍满足 minEnd** 时才退；
+	// 否则本片短到下一次调用会退回原地，切分就开始空转。
+	if r, ok := regionAt(prot, cut); ok {
+		if r.start > minEnd {
+			return r.start
+		}
+		// 2b) 退不到块首 → 在块内找一个**离 limit 最近、且不短于 minEnd** 的行边界。
+		//
+		// ⚠️ 搜索区间必须是 (minEnd, limit) 而不是 (pos, cut)——
+		// 后者会反复找到同一个行边界，于是每次切出的 end 都不变，
+		// 切分靠 `next = pos + 1` 一个字符一个字符地挪，
+		// 把一段文字切成几十个碎片（实测 545 字符切出 47 片）。
+		if lb := lastLineBreak(runes, minEnd, limit); lb > minEnd {
+			return lb
+		}
+		// 2c) 块内连行边界都没有（超长单行）——这时只能切满一片。
+		//
+		// 这是唯一会从一行中间切开的路径，而且无法避免：
+		// 一行 300 字的图表，任何小于 300 的上限都切不动它。
+		// 至少保证切分**严格前进**。
+		return limit
+	}
+
+	// 3) 断点太靠近起点 → 在 (minEnd, limit] 里重新找一个断点。
+	//
+	// ⚠️ 这里**不能写成 `cut = minEnd`**。那样下一片的起点正好是 pos+1，
+	// 于是每次只前进一个字符，一段文字被切成几十个碎片——
+	// 实测 545 字符切出 27 片，而**不报任何错**，只是片段数暴涨、
+	// 每个碎片几十个字。最初还以为是检索变差了。
+	if cut <= minEnd {
+		if b := lastSentenceBreak(runes, minEnd, limit); b > minEnd {
+			return b
+		}
+		return limit
+	}
+	return cut
+}
+
+// lastLineBreak 在 (from, limit) 范围内从后往前找行边界，返回换行符之后的下标。
+// 找不到返回 0。
+//
+// 「行边界」的判据是换行符而不是别的：Markdown 里代码块和表格的语义单位
+// 就是行，从一行中间切开会让两边都不成形。
+func lastLineBreak(runes []rune, from, limit int) int {
+	for i := limit - 1; i > from; i-- {
+		if runes[i] == '\n' {
+			return i + 1
+		}
+	}
+	return 0
 }

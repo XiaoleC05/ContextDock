@@ -169,12 +169,29 @@ var mutations = []mutation{
 		new:  `if false {`,
 	},
 	{
+		// 切分点不再优先落在句末标点：一句话会被从中间劈开，
+		// 两个片段都变得语义不完整。
 		name: "chunk: 不在句末标点断开",
 		file: "internal/chunk/chunker.go",
-		old: `} else if brk := lastSentenceBreak(runes, pos, end); brk > pos {
-			end = brk
-		}`,
-		new: `}`,
+		old:  `cut := lastSentenceBreak(runes, pos, limit)`,
+		new:  `cut := limit`,
+	},
+
+	{
+		// 切分点退得太靠近起点 → 下一片只前进一个字符，
+		// 一段文字被切成几十个碎片（实测 545 字符切出 27 片）而不报错。
+		name: "chunk: 断点不设最小前进距离（切分空转）",
+		file: "internal/chunk/chunker.go",
+		old:  `if cut <= minEnd {`,
+		new:  `if false {`,
+	},
+	{
+		// 在保护区起点结束时仍然回退重叠：起点被拉回块前，
+		// 刚保护好的整块又放不进下一片的窗口里。
+		name: "chunk: 在保护区起点结束时仍回退重叠",
+		file: "internal/chunk/chunker.go",
+		old:  `if _, ok := regionStartingAt(prot, cutBeforeTrim); ok {`,
+		new:  `if _, ok := regionStartingAt(prot, cutBeforeTrim); false && ok {`,
 	},
 
 	{

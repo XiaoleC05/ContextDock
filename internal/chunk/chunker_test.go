@@ -513,3 +513,188 @@ func BenchmarkSplitChinese(b *testing.B) {
 		}
 	}
 }
+
+// ---- 保护区：围栏代码块与表格 ----
+
+// contentOf 把片段还原成原文，便于断言"整块有没有被保住"。
+func contentOf(t *testing.T, content string, c types.Chunk) string {
+	t.Helper()
+	r := []rune(content)
+	if c.EndOffset > len(r) {
+		t.Fatalf("片段偏移越界：[%d,%d)，原文长 %d", c.StartOffset, c.EndOffset, len(r))
+	}
+	return string(r[c.StartOffset:c.EndOffset])
+}
+
+// TestFencedBlockStaysWholeWhenItFits 守护「放得下的围栏块必须整体保留」。
+//
+// 这是 #47 的核心：一张架构图被切成几片之后，每一片都不成形，
+// 语义为空、向量是噪声，却会随机匹配到不相关的查询、占掉一个结果位。
+func TestFencedBlockStaysWholeWhenItFits(t *testing.T) {
+	block := "```text\n" +
+		"┌──────────────┐\n" +
+		"│  ContextDock │\n" +
+		"└──────────────┘\n" +
+		"```\n"
+	content := "前置说明文字，用来把围栏块推到片段中部。\n\n" + block + "\n后置说明文字。\n"
+
+	c := newChunker(t, Config{MaxRunes: 120, OverlapRunes: 20})
+	chunks := mustSplit(t, c, 1, content)
+
+	var found bool
+	for _, ch := range chunks {
+		if strings.Contains(contentOf(t, content, ch), block) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("放得下的围栏块应当被某个片段完整包含，实际切成了：")
+		for i, ch := range chunks {
+			t.Errorf("  片段 %d: %q", i, contentOf(t, content, ch))
+		}
+	}
+}
+
+// TestOversizedFencedBlockBreaksOnlyAtLineBoundaries 守护「超长围栏块退而求其次」。
+//
+// 块本身超过 MaxRunes 时物理上无法整体保留，此时**只能在行边界切**。
+// 从一行中间切开会让两个片段都从半行开始——那是可见的质量问题，
+// 而且它不报错。
+func TestOversizedFencedBlockBreaksOnlyAtLineBoundaries(t *testing.T) {
+	// 造一个远超上限的围栏块，每行长度不同，避免"恰好切在行首"的巧合。
+	var b strings.Builder
+	b.WriteString("```text\n")
+	for i := 0; i < 30; i++ {
+		b.WriteString(strings.Repeat("图", i%5+3))
+		b.WriteString(" 一段图表内容\n")
+	}
+	b.WriteString("```\n")
+	content := "开头。\n" + b.String() + "结尾。\n"
+
+	c := newChunker(t, Config{MaxRunes: 80, OverlapRunes: 10})
+	chunks := mustSplit(t, c, 1, content)
+
+	fenceStart := strings.Index(content, "```text")
+	r := []rune(content)
+	for i, ch := range chunks {
+		// 只查**结束**端点：那才是 cutPoint 决定的。
+		//
+		// ⚠️ 起点这里**不查**——起点由「结束位置减去重叠」得出，天然落在行中间。
+		// 那是 #48（重叠起点吸附行边界）的范围。混在一起查的话，
+		// 这条测试会在 #47 还没做完时就红，说不清是谁的问题。
+		pos := ch.EndOffset
+		if pos <= fenceStart || pos >= len(r) {
+			continue
+		}
+		if r[pos-1] == '\n' || r[pos] == '\n' {
+			continue // 行边界，合法
+		}
+		t.Errorf("片段 %d 的结束端点 %d 落在围栏块内的行中间：%q",
+			i, pos, contentOf(t, content, ch))
+	}
+}
+
+// TestTableRowsStayTogether 守护表格不被从中间切开。
+func TestTableRowsStayTogether(t *testing.T) {
+	table := "| 变量 | 默认值 | 说明 |\n" +
+		"| --- | --- | --- |\n" +
+		"| TOP_K | 10 | 返回条数 |\n" +
+		"| TIMEOUT | 5s | 检索超时 |\n"
+	content := "配置说明如下，请仔细阅读每一项的含义。\n\n" + table + "\n以上是全部配置。\n"
+
+	c := newChunker(t, Config{MaxRunes: 90, OverlapRunes: 10})
+	chunks := mustSplit(t, c, 1, content)
+
+	// 片段末尾的空白会被裁掉，所以比对时也要裁掉表格自己的尾随换行——
+	// 否则这条测试会因为"差一个 \n"而红，让人以为是切分的问题。
+	want := strings.TrimRight(table, "\n")
+
+	var found bool
+	for _, ch := range chunks {
+		if strings.Contains(contentOf(t, content, ch), want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("放得下的表格应当被某个片段完整包含，实际切成了：")
+		for i, ch := range chunks {
+			t.Errorf("  片段 %d: %q", i, contentOf(t, content, ch))
+		}
+	}
+}
+
+// TestFreestandingPipesAreNotTable 守护「≥3 行才算表格」那条阈值。
+//
+// 单独几行以 | 开头更可能是正文里恰好这么排版的内容（命令行管道、
+// 或一行 Markdown 示例）。把它们当表格保护起来，反而会把正常段落切碎。
+func TestFreestandingPipesAreNotTable(t *testing.T) {
+	content := "示例命令：\n" +
+		"cat a.txt | grep foo\n" +
+		"ls -la | wc -l\n" +
+		"\n" +
+		"继续正文，这一段很长很长要保证它会被切分。" +
+		strings.Repeat("补充内容。", 20) + "\n"
+
+	c := newChunker(t, Config{MaxRunes: 60, OverlapRunes: 10})
+	chunks := mustSplit(t, c, 1, content)
+	if len(chunks) < 3 {
+		t.Fatalf("这段内容应当被切成多个片段，实际 %d 个", len(chunks))
+	}
+	// 关键断言：保护逻辑不该吞掉任何内容。
+	//
+	// ⚠️ 不能断言「最后一个片段的 EndOffset == 原文长度」——
+	// 末尾空白本来就会被裁掉，那是既有行为。要查的是**非空白字符**全覆盖。
+	runes := []rune(content)
+	covered := make([]bool, len(runes))
+	for _, ch := range chunks {
+		for i := ch.StartOffset; i < ch.EndOffset; i++ {
+			covered[i] = true
+		}
+	}
+	for i, r := range runes {
+		if !isSpace(r) && !covered[i] {
+			t.Errorf("第 %d 个字符 %q 没有被任何片段覆盖（丢内容了）", i, r)
+		}
+	}
+}
+
+// TestChunkAlwaysAdvances 守护「切分必须严格前进」。
+//
+// ⚠️ 这条测试来自一次真实事故：第一版保护区实现允许把切分点退到「任何
+// region.start > pos」的位置，而下一片的起点是 end-overlap——
+// 于是退到块首之后又退回到块首之前，两次调用算出同一个 end，
+// 切分原地打转，全靠 `next = pos + 1` 兜底一个字符一个字符地挪。
+//
+// 症状是片段数暴涨（实测 196 → 313）而**不报任何错**，
+// 表现成「改了切分之后检索变差」——根因在切分空转，不在检索。
+func TestChunkAlwaysAdvances(t *testing.T) {
+	// 一段"保护区紧贴着起点"的内容：块首离 pos 很近，
+	// 退到块首会让本片几乎不前进。
+	content := strings.Repeat("字", 30) + "\n" +
+		"```text\n" + strings.Repeat("图", 300) + "\n```\n" +
+		strings.Repeat("文", 200) + "\n"
+
+	for _, cfg := range []Config{
+		{MaxRunes: 100, OverlapRunes: 20},
+		{MaxRunes: 100, OverlapRunes: 0},
+		{MaxRunes: 400, OverlapRunes: 60},
+	} {
+		c := newChunker(t, cfg)
+		chunks := mustSplit(t, c, 1, content)
+
+		// 片段数不该远多于 content/MaxRunes——远超就说明在空转。
+		runes := len([]rune(content))
+		maxReasonable := runes/(cfg.MaxRunes-cfg.OverlapRunes) + 8
+		if len(chunks) > maxReasonable {
+			t.Errorf("cfg=%+v：切出 %d 个片段，内容 %d 字符、理论上限约 %d 个——切分在空转",
+				cfg, len(chunks), runes, maxReasonable)
+		}
+		// 每个片段都必须真的覆盖一段内容。
+		for i, ch := range chunks {
+			if ch.EndOffset <= ch.StartOffset {
+				t.Errorf("cfg=%+v：片段 %d 长度为 0", cfg, i)
+			}
+		}
+	}
+}
