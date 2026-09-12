@@ -366,6 +366,7 @@ go run ./cmd/mutate bm25     # 只跑名字含 bm25 的
 | [docs/DESIGN.md](docs/DESIGN.md) | 12 条关键设计决策，含被否决的替代方案 |
 | [docs/PITFALLS.md](docs/PITFALLS.md) | 踩过的坑：环境 / Go 语言 / 外部 API / 数据库 |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | 性能基准与优化记录（含 pprof 分析） |
+| [docs/EVAL.md](docs/EVAL.md) | 检索评测集格式与校验命令 |
 | [Issues](https://github.com/XiaoleC05/ContextDock/issues) | 开发任务，一个 issue 一个可交付物 |
 
 ---

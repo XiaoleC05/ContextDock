@@ -348,6 +348,69 @@ var mutations = []mutation{
 		old:  `chunks[i].SetMetadata(types.MetadataKeySource, doc.Source)`,
 		new:  `_ = chunks[i]`,
 	},
+
+	// ---- eval ----
+	// 评测集是这一整个里程碑的**基准尺**。尺子本身错了，后面所有数据都不可信，
+	// 而且错的方式往往很安静：命中率偏低一点，看起来只是「检索效果一般」。
+	// 这几条变异就是用来钉死「尺子不会悄悄坏掉」的。
+	{
+		// 引文定位的偏移单位。按字节算的话，中文文档上偏移会偏大近 3 倍，
+		// 代码照样编译、照样运行、照样给出一个看起来合理的命中率。
+		name: "eval: 引文偏移按字节算（不是 rune）",
+		file: "internal/eval/locate.go",
+		old:  `start = utf8.RuneCountInString(content[:idx])`,
+		new:  `start = idx`,
+	},
+	{
+		// 半开区间用 a<d && c<b 判重叠，只在区间非空时与 max/min 等价。
+		name: "eval: 区间重叠判据换回 a<d && c<b",
+		file: "internal/eval/locate.go",
+		old:  `return max(s.Start, o.Start) < min(s.End, o.End)`,
+		new:  `return s.Start < o.End && o.Start < s.End`,
+	},
+	{
+		// 引文出现多次却取第一次：标注者以为标了 A 处、实际测的是 B 处，
+		// 而结果看起来完全正常。
+		name: "eval: 引文重复时不报错，直接取第一次",
+		file: "internal/eval/locate.go",
+		old:  `if !explicit && strings.Index(content[from:], quote) >= 0 {`,
+		new:  `if false && strings.Index(content[from:], quote) >= 0 {`,
+	},
+	{
+		name: "eval: 不校验语料指纹（语料漂移静默通过）",
+		file: "internal/eval/corpus.go",
+		old:  `if !strings.EqualFold(got, f.SHA256) {`,
+		new:  `if false {`,
+	},
+	{
+		// 只归一化 CRLF 而漏掉单独的 CR，跨平台指纹就会不一致。
+		name: "eval: 换行归一化漏掉单独的 CR",
+		file: "internal/eval/corpus.go",
+		old: `	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")`,
+		new: `	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return s`,
+	},
+	{
+		name: "eval: 不查重复 query",
+		file: "internal/eval/load.go",
+		old:  `if prev, dup := seenQuery[key]; dup {`,
+		new:  `if prev, dup := seenQuery[key]; false && dup {`,
+	},
+	{
+		// 手写评测集时最常见的错误就是字段名拼错，
+		// 标准解析器会静默忽略未知字段，那条期望命中就凭空消失了。
+		name: "eval: 容忍未知字段（拼错的字段被静默忽略）",
+		file: "internal/eval/load.go",
+		old:  `dec.DisallowUnknownFields()`,
+		new:  `_ = dec`,
+	},
+	{
+		name: "eval: 省略的 grade 补成「部分相关」而非「完全回答」",
+		file: "internal/eval/load.go",
+		old:  `e.Grade = GradeFull`,
+		new:  `e.Grade = GradePartial`,
+	},
 }
 
 // ---------------------------------------------------------------------------
