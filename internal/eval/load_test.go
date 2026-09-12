@@ -285,6 +285,54 @@ func TestLoadReportsWhichQuery(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsSynonymQueryWithLiteralOverlap(t *testing.T) {
+	// 同义改写组的存在意义是「一个字都对不上，只能靠语义召回」。
+	// 一旦共享字面 token，词法通道就能撞上它，这组立刻退化成普通查询——
+	// 而它名义上还在给「向量通道的贡献」背书，会让 #40 的结论直接出错。
+	//
+	// 这里的「编译」「失败」与语料里的「交叉编译会失败」是共有 token。
+	const q = "编译失败的原因是什么"
+	if shared := sharedTokens(q, corpusDoc); len(shared) == 0 {
+		t.Fatal("测试语料本身没有重叠，这条测试需要换查询")
+	}
+
+	root := setupTree(t, map[string]string{
+		"synonym.json": fmt.Sprintf(`{
+			"version": 1, "group": "synonym", "title": "同义改写",
+			"queries": [{"id":"sy-001","query":%q,
+			             "expect":[{"source":"doc.md","quote":"gojieba 依赖 cgo"}]}]
+		}`, q),
+	}, corpusDoc)
+
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("共享字面 token 时应报错")
+	}
+	if !strings.Contains(err.Error(), "sy-001") {
+		t.Errorf("错误里应指出是哪一条，实际:\n%v", err)
+	}
+}
+
+func TestLoadAcceptsSynonymQueryWithoutOverlap(t *testing.T) {
+	// 反面：完全不共享 token 的同义改写应当通过。
+	// 少了这条，把检查写成「永远报错」也能让上面那条测试变绿。
+	root := setupTree(t, map[string]string{
+		"synonym.json": `{
+			"version": 1, "group": "synonym", "title": "同义改写",
+			"queries": [{"id":"sy-001","query":"中文切词工具为什么没选用现成库",
+			             "expect":[{"source":"doc.md","quote":"gojieba 依赖 cgo"}]}]
+		}`,
+	}, corpusDoc)
+
+	// 先确认这两段确实不共享 token —— 否则这条测试会因为语料巧合而失去意义。
+	if shared := sharedTokens("中文切词工具为什么没选用现成库", corpusDoc); len(shared) > 0 {
+		t.Fatalf("测试语料本身就有重叠 %v，这条测试需要换查询", shared)
+	}
+	if _, err := Load(root); err != nil {
+		t.Fatalf("不该报错，实际: %v", err)
+	}
+}
+
 func TestLoadRejectsDuplicateQueryAcrossFiles(t *testing.T) {
 	// 跨文件查重：只差首尾空格、只差大小写的两个 query 实际是同一条，
 	// 它们会让整体指标里这一条被算两遍。

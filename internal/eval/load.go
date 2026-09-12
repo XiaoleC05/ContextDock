@@ -10,6 +10,10 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/XiaoleC05/ContextDock/internal/chunk"
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
+	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
 // eval/ 下的固定路径。集中在这里，避免各处拼字符串拼错。
@@ -153,6 +157,10 @@ func loadQuerySets(dir string, corpus *Corpus, contents map[string]string) ([]Qu
 		seenID    = make(map[string]string)
 	)
 
+	// 每份语料按默认参数切一遍，供同义改写组做字面重叠检查。
+	// 切分是纯内存计算，5 份文档 200 个片段，成本可以忽略。
+	chunked := chunkAll(contents, corpusSources(corpus))
+
 	// 排序遍历：ReadDir 本身就按文件名排序，这里显式排一次是为了
 	// 让「报错的顺序」也确定 —— 否则同一份错误数据在不同机器上
 	// 可能报出不同的第一条问题，对比输出时会以为改了东西。
@@ -204,7 +212,7 @@ func loadQuerySets(dir string, corpus *Corpus, contents map[string]string) ([]Qu
 		for i := range set.Queries {
 			q := &set.Queries[i]
 			q.File = e.Name()
-			validateQuery(q, i+1, corpus, contents, seenQuery, seenID, problems)
+			validateQuery(q, i+1, set.Group, corpus, contents, chunked, seenQuery, seenID, problems)
 		}
 		byGroup[set.Group] = set
 	}
@@ -227,7 +235,8 @@ func loadQuerySets(dir string, corpus *Corpus, contents map[string]string) ([]Qu
 }
 
 // validateQuery 校验一条 query 并定位它的全部引文。
-func validateQuery(q *Query, seq int, corpus *Corpus, contents map[string]string,
+func validateQuery(q *Query, seq int, group Group, corpus *Corpus, contents map[string]string,
+	chunked map[string][]types.Chunk,
 	seenQuery, seenID map[string]string, problems *Problems) {
 
 	where := fmt.Sprintf("%s 第 %d 条", q.File, seq)
@@ -262,6 +271,7 @@ func validateQuery(q *Query, seq int, corpus *Corpus, contents map[string]string
 		return
 	}
 
+	synonymChecked := false
 	for j := range q.Expect {
 		e := &q.Expect[j]
 		tag := fmt.Sprintf("%s 的第 %d 个期望命中", where, j+1)
@@ -295,7 +305,100 @@ func validateQuery(q *Query, seq int, corpus *Corpus, contents map[string]string
 			continue
 		}
 		e.Start, e.End = start, end
+
+		// 同义改写组的自动化检查（#36 的验收要求）。
+		//
+		// 这组的**存在意义**就是「查询和目标原文一个字都对不上，只能靠语义召回」。
+		// 一旦共享了字面 token，词法通道就能撞上它，这组立刻退化成
+		// 「又一条普通查询」——而它名义上还在给「向量通道的贡献」背书。
+		// 那会让 #40 的结论直接出错，且从报告上看不出任何异常。
+		//
+		// 所以宁可在校验期拦死，也不留一条悄悄失真的评测数据。
+		if group == GroupSynonym && !synonymChecked {
+			synonymChecked = true
+			if idx, shared := overlappedChunkSharingTokens(
+				chunked[e.Source], q.Query, Span{start, end}); len(shared) > 0 {
+				problems.Addf("%s: 同义改写组不该与目标片段共享任何词，"+
+					"但与 %s 第 %d 个片段共有了 %v。共享字面 token 会让词法通道也能命中，"+
+					"这组就失去「只测向量通道」的意义", where, e.Source, idx, shared)
+			}
+		}
 	}
+}
+
+// tokenizer 是无状态且并发安全的，包级复用一份即可。
+var sharedTokenizer = tokenize.New()
+
+// sharedTokens 返回两段文本共有的 token，去重后按字典序排列。
+//
+// 用项目自己的分词器而不是简单的子串匹配：BM25 索引的正是这里切出来的 token，
+// 用别的口径去查会得到「检查说没重叠、检索却撞上了」这种自相矛盾的结论。
+func sharedTokens(a, b string) []string {
+	if a == "" || b == "" {
+		return nil
+	}
+	inB := make(map[string]struct{}, 64)
+	for _, t := range sharedTokenizer.Tokenize(b) {
+		inB[t] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, t := range sharedTokenizer.Tokenize(a) {
+		if _, ok := inB[t]; !ok {
+			continue
+		}
+		if _, dup := seen[t]; dup {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// overlappedChunkSharingTokens 找出与引文区间重叠、且与查询共享 token 的片段。
+//
+// 返回片段序号（1-based）与共有的 token。
+//
+// 为什么拿**真实片段**比，而不是在引文前后取固定窗口：
+// 要被词法通道召回的是片段，而 BM25 索引的是片段的 IndexText()
+// （含标题面包屑）。固定窗口只是它的近似，会给出「检查说没重叠、
+// 检索却撞上了」这种自相矛盾的结论——而检查的全部价值就在于可信。
+//
+// ⚠️ 片段按**切分器默认参数**切出。切分参数变了，这条检查的判据也会变；
+// 它是一道**标注期的质量闸门**，不是运行期的保证。
+// 运行期的真凭实据来自评测报告的按通道拆分（那里直接看词法通道召回了什么）。
+func overlappedChunkSharingTokens(chunks []types.Chunk, query string, span Span) (int, []string) {
+	for i, c := range chunks {
+		if !span.Overlaps(Span{c.StartOffset, c.EndOffset}) {
+			continue
+		}
+		if shared := sharedTokens(query, c.IndexText()); len(shared) > 0 {
+			return i + 1, shared
+		}
+	}
+	return 0, nil
+}
+
+// chunkAll 用切分器**默认参数**把每份语料切一遍，供同义改写组做重叠检查。
+//
+// 切不动（空文档等）的语料返回空片段列表，由校验的其它分支去报错，
+// 不在这里拦——这里只是给重叠检查提供素材。
+func chunkAll(contents map[string]string, sources []string) map[string][]types.Chunk {
+	chunker, err := chunk.New(chunk.DefaultConfig())
+	if err != nil {
+		return nil
+	}
+	out := make(map[string][]types.Chunk, len(sources))
+	for _, src := range sources {
+		chunks, err := chunker.Split(1, contents[src])
+		if err != nil {
+			continue
+		}
+		out[src] = chunks
+	}
+	return out
 }
 
 // corpusSources 返回清单里全部 source，用于「可用的有哪些」这类提示。
