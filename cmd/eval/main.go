@@ -30,6 +30,7 @@ import (
 	"github.com/XiaoleC05/ContextDock/internal/config"
 	"github.com/XiaoleC05/ContextDock/internal/embed"
 	"github.com/XiaoleC05/ContextDock/internal/eval"
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
 )
 
 func main() {
@@ -53,6 +54,8 @@ func run() error {
 		maxRunes = flag.Int("maxrunes", 0, "切分最大字符数，默认 400")
 		overlap  = flag.Int("overlap", -1, "切分重叠字符数，默认 60（0 是合法值，故默认 -1）")
 		ndcgK    = flag.Int("ndcgk", 0, "NDCG 的截断位置，默认 10")
+
+		tokenizeScheme = flag.String("tokenize", "", "CJK 分词方案：bigram / unigram / both（默认 bigram）")
 
 		asJSON = flag.Bool("json", false, "输出机读 JSON 而不是表格")
 		detail = flag.Bool("detail", false, "报告里带上逐条查询明细（供失败分析）")
@@ -105,7 +108,8 @@ func run() error {
 	opt := eval.Options{
 		TopK: *topK, RRFK: *rrfK, Mult: *mult,
 		MaxRunes: *maxRunes, Overlap: *overlap, NDCGK: *ndcgK,
-		KeepDetail: *detail || *asJSON,
+		TokenizeScheme: tokenize.Scheme(*tokenizeScheme),
+		KeepDetail:     *detail || *asJSON,
 	}
 	if *overlap >= 0 {
 		opt.Overlap = *overlap

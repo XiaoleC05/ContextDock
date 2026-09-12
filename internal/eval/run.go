@@ -12,6 +12,7 @@ import (
 	"github.com/XiaoleC05/ContextDock/internal/retrieve"
 	"github.com/XiaoleC05/ContextDock/internal/service"
 	"github.com/XiaoleC05/ContextDock/internal/store"
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
@@ -55,6 +56,10 @@ type Options struct {
 
 	// NDCGK 是 NDCG 的截断位置。
 	NDCGK int `json:"ndcg_k"`
+
+	// TokenizeScheme 是 CJK 分词方案（#45 的对比实验用）。
+	// 空值表示用默认（bigram）。
+	TokenizeScheme tokenize.Scheme `json:"tokenize_scheme,omitempty"`
 
 	// KeepDetail 为真时在报告里保留逐条查询的明细。
 	KeepDetail bool `json:"-"`
@@ -114,6 +119,9 @@ func (o Options) Normalize() Options {
 	}
 	if o.NDCGK <= 0 {
 		o.NDCGK = NDCGK
+	}
+	if !o.TokenizeScheme.Valid() {
+		o.TokenizeScheme = tokenize.SchemeBigram
 	}
 	return o
 }
@@ -269,6 +277,7 @@ func Run(ctx context.Context, suite *Suite, emb embed.Embedder, opt Options, log
 		UseMemoryStore: true,
 		PoolMaxConns:   8,
 		EmbeddingDim:   types.EmbeddingDim,
+		TokenizeScheme: opt.TokenizeScheme,
 	}
 	svc, err := service.New(cfg, emb, store.NewMemory())
 	if err != nil {

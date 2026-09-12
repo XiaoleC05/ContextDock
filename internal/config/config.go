@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
@@ -77,6 +78,14 @@ type Config struct {
 	ChunkMaxRunes int
 	ChunkOverlap  int
 
+	// 分词方案（CJK 部分）。
+	//
+	// ⚠️ **刻意不接环境变量。** 它是 #45 对比实验用的旋钮，
+	// 不是用户配置：当前选型（bigram）是 DESIGN §3 的结论，
+	// 多暴露一个用户可调的旋钮，就多一组需要长期维护和测试的组合。
+	// 实验做完、结论落地之后，这个字段要么被写死，要么按结论换掉默认值。
+	TokenizeScheme tokenize.Scheme
+
 	// EmbeddingDim 是向量维度，从 types 带入，方便统一引用。
 	EmbeddingDim int
 }
@@ -117,6 +126,7 @@ func LoadWith(getenv Getenv) (*Config, error) {
 		SearchTimeout:      DefaultSearchTimeout,
 		ChunkMaxRunes:      DefaultChunkMaxRunes,
 		ChunkOverlap:       DefaultChunkOverlap,
+		TokenizeScheme:     tokenize.SchemeBigram,
 		PoolMaxConns:       DefaultPoolMaxConns,
 		EmbeddingDim:       types.EmbeddingDim,
 	}
@@ -203,6 +213,17 @@ func (c *Config) Validate() error {
 	if c.ChunkOverlap < 0 || c.ChunkOverlap >= c.ChunkMaxRunes {
 		return fmt.Errorf("%w: ChunkOverlap(%d) 必须 >=0 且小于 ChunkMaxRunes(%d)",
 			ErrBadValue, c.ChunkOverlap, c.ChunkMaxRunes)
+	}
+	// ⚠️ 空值放行，表示「用默认方案」。
+	//
+	// 与 ChunkOverlap 那条**刻意不同**：那边 0 是一个有意义的取值，
+	// 所以不能拿零值当哨兵；这边空串没有任何合理解释，
+	// 「空 = 默认」是安全的，也让手写的 config.Config{} 仍然可用。
+	//
+	// 一致性由 tokenize.NewWith 兜底：它对非法方案也回落成 bigram。
+	if c.TokenizeScheme != "" && !c.TokenizeScheme.Valid() {
+		return fmt.Errorf("%w: TokenizeScheme=%q 不是合法方案（%v）",
+			ErrBadValue, c.TokenizeScheme, tokenize.AllSchemes)
 	}
 	if c.SearchTimeout <= 0 {
 		return fmt.Errorf("%w: SearchTimeout 必须为正数，实际 %v", ErrBadValue, c.SearchTimeout)

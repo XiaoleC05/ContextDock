@@ -110,6 +110,21 @@ var mutations = []mutation{
 	}`,
 	},
 
+	{
+		// 切到某方案时其实没切换：两组数据一模一样，
+		// 然后被当成「方案没影响」——而那是实验做废了，不是结论。
+		name: "tokenize: unigram/both 方案不产出单字",
+		file: "internal/tokenize/tokenizer.go",
+		old:  `if t.Scheme() != SchemeBigram {`,
+		new:  `if false {`,
+	},
+	{
+		name: "tokenize: unigram 方案也产出 bigram",
+		file: "internal/tokenize/tokenizer.go",
+		old:  `if t.Scheme() != SchemeUnigram {`,
+		new:  `if true {`,
+	},
+
 	// ---- chunk ----
 	// 这条对应开发时真实踩到的 bug：hitEnd 在去空白之前算，
 	// 改成 false 后短段落会退化成一个字符一段。

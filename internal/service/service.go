@@ -22,6 +22,7 @@ import (
 	"github.com/XiaoleC05/ContextDock/internal/ingest"
 	"github.com/XiaoleC05/ContextDock/internal/retrieve"
 	"github.com/XiaoleC05/ContextDock/internal/store"
+	"github.com/XiaoleC05/ContextDock/internal/tokenize"
 	"github.com/XiaoleC05/ContextDock/internal/types"
 )
 
@@ -96,8 +97,10 @@ func New(cfg *config.Config, emb embed.Embedder, st store.Store) (*Service, erro
 		embedder: emb,
 		store:    st,
 		ingester: ingest.New(chunker, emb, st),
-		bm25:     retrieve.NewBM25(),
-		vecIdx:   retrieve.NewVectorIndex(),
+		// 分词方案来自配置，索引端与查询端共用这一个实例——
+		// 两边用不同的分词器会让召回静默对不上（见 tokenize 包的说明）。
+		bm25:   retrieve.NewBM25().WithTokenizer(tokenize.NewWith(cfg.TokenizeScheme)),
+		vecIdx: retrieve.NewVectorIndex(),
 	}, nil
 }
 
